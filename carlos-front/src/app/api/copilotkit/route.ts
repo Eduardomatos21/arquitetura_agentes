@@ -16,7 +16,7 @@ const runtime = new CopilotRuntime({
   agents: {
     // Our FastAPI endpoint URL
     // TODO: change the name of the agent to the name of the agent and pass the URL to env variable
-    "my_agent": new HttpAgent({url: "http://localhost:8000/"}),
+    "histopathology_agent": new HttpAgent({url: "http://localhost:8000/"}),
   }   
 });
  
