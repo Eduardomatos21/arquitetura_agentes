@@ -45,7 +45,7 @@ type AgentState = {
 function YourMainContent({ themeColor }: { themeColor: string }) {
   // 🪁 Shared State: https://docs.copilotkit.ai/coagents/shared-state
   const { state, setState } = useCoAgent<AgentState>({
-    name: "my_agent",
+    name: "histopathology_agent",
     initialState: {
       proverbs: [
         "CopilotKit may be new, but its the best thing since sliced bread.",
