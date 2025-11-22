@@ -11,6 +11,16 @@ from langchain_chroma import Chroma
 from langchain_core.embeddings import Embeddings
 from transformers import XLMRobertaTokenizer
 
+from typing import Optional
+
+# ADK imports para acessar contexto de tool
+try:
+    from google.adk.tools import ToolContext
+    TOOL_CONTEXT_AVAILABLE = True
+except ImportError:
+    TOOL_CONTEXT_AVAILABLE = False
+    ToolContext = None
+
 # MUSK imports e disponibilidade
 from musk import utils, modeling
 from timm.models import create_model
@@ -27,6 +37,9 @@ TOP_K = 5
 VECTORSTORE_DIR = "./streamlit_chroma_vectorstore_precomputed"
 cuda_device = os.environ.get("NVIDIA_VISIBLE_DEVICES", "0")
 DEVICE = torch.device(f"cuda:{cuda_device}" if torch.cuda.is_available() and cuda_device.isdigit() else "cuda:0" if torch.cuda.is_available() else "cpu")
+
+# Cache global para imagens processadas (para contornar truncamento do ADK)
+_IMAGE_CACHE = {}
 
 # Singleton
 _MUSK_MODEL = None
@@ -109,50 +122,79 @@ def load_vectorstore():
 # ======================================
 # FERRAMENTAS ADK
 # ======================================
-def search_by_image_query(image: str, top_k: int = TOP_K) -> str:
+def search_by_image_query(top_k: int = TOP_K, tool_context = None) -> str:
     """Busca imagens de lâminas histológicas semelhantes a partir de uma imagem de consulta.
     
     Esta ferramenta utiliza o modelo MUSK (Multimodal Universal Search with Knowledge) para
     gerar embeddings da imagem fornecida e buscar as imagens mais semelhantes no banco de dados
     de lâminas histológicas pré-indexadas.
     
-    IMPORTANTE: Esta função processa a imagem internamente e retorna apenas os resultados da busca.
-    Não inclua dados brutos da imagem (como strings base64) no output ou nas respostas ao usuário.
-    Apenas apresente os resultados formatados retornados por esta função.
+    IMPORTANTE: A imagem é extraída automaticamente do contexto da mensagem do usuário.
+    Não é necessário passar a imagem como parâmetro - ela será obtida do cache global
+    que é preenchido quando o usuário envia uma imagem.
     
     Args:
-        image: String representando a imagem em um dos seguintes formatos:
-            - Caminho local de arquivo (ex: "/path/to/image.jpg")
-            - URI do Google Cloud Storage (ex: "gs://bucket/image.jpg")
-            - URI HTTP/HTTPS (ex: "https://example.com/image.jpg")
-            - Data URI base64 (ex: "data:image/jpeg;base64,/9j/4AAQ...")
-            Quando chamado pelo ADK com conteúdo multimodal, a imagem é passada como string
-            (geralmente URI ou base64). Strings base64 muito longas (>10MB) podem causar lentidão.
         top_k: Número de resultados similares a retornar. Padrão é 5.
+        tool_context: Contexto da ferramenta (fornecido automaticamente pelo ADK).
     
     Returns:
         String formatada contendo os resultados da busca, incluindo:
         - Posição do resultado
         - Percentual de similaridade
         - Identificador ou descrição da imagem encontrada
-        
-        NOTA: Retorne apenas este resultado formatado. Não inclua os dados brutos da imagem
-        (como a string base64) na resposta ao usuário.
-        
+    
     Examples:
-        >>> # Usando caminho local
-        >>> search_by_image_query("/path/to/histology_slide.jpg", top_k=3)
-        "Resultado #1: 85.23% de similaridade - ISIC_0053494.jpg\n..."
-        
-        >>> # Usando URI HTTP
-        >>> search_by_image_query("https://example.com/image.jpg", top_k=3)
-        "Resultado #1: 85.23% de similaridade - ISIC_0053494.jpg\n..."
-        
-        >>> # Usando base64 (quando chamado pelo ADK)
-        >>> search_by_image_query("data:image/jpeg;base64,/9j/4AAQ...", top_k=3)
+        >>> search_by_image_query(top_k=3)
         "Resultado #1: 85.23% de similaridade - ISIC_0053494.jpg\n..."
     """
     start_time = time.time()
+    
+    print(f"\n🔍 [search_by_image_query] Iniciando busca...")
+    print(f"  - top_k: {top_k}")
+    print(f"  - tool_context disponível: {tool_context is not None}")
+    
+    # Tentar recuperar imagem do cache ou contexto
+    image = None
+    
+    # Estratégia 1: Recuperar do cache global (preenchido no before_model_modifier)
+    if _IMAGE_CACHE:
+        print(f"  ✅ Cache contém {len(_IMAGE_CACHE)} imagem(ns)")
+        # Pegar a primeira (e provavelmente única) imagem do cache
+        cache_key = list(_IMAGE_CACHE.keys())[0]
+        image = _IMAGE_CACHE[cache_key]
+        print(f"  ✅ Imagem recuperada do cache: {len(image)} chars")
+        # Limpar cache após uso
+        del _IMAGE_CACHE[cache_key]
+    
+    # Estratégia 2: Se não tem no cache, tentar acessar do tool_context
+    elif tool_context is not None and TOOL_CONTEXT_AVAILABLE:
+        try:
+            # Tentar acessar a imagem do contexto da requisição
+            if hasattr(tool_context, 'llm_request') and tool_context.llm_request:
+                # Procurar imagem nos contents
+                for content in tool_context.llm_request.contents or []:
+                    if content.parts:
+                        for part in content.parts:
+                            if hasattr(part, 'inline_data') and part.inline_data:
+                                blob = part.inline_data
+                                if hasattr(blob, 'data') and blob.data:
+                                    mime_type = getattr(blob, 'mime_type', 'image/png')
+                                    image_b64 = base64.b64encode(blob.data).decode('utf-8')
+                                    image = f"data:{mime_type};base64,{image_b64}"
+                                    print(f"  ✅ Imagem completa recuperada do contexto: {mime_type}, {len(blob.data)} bytes")
+                                    break
+                        if image and image.startswith("data:image/"):
+                            break
+        except Exception as e:
+            print(f"  ⚠️  Erro ao acessar imagem do contexto: {e}")
+    
+    # Se ainda não tem imagem, retornar erro
+    if not image:
+        error_msg = "❌ Nenhuma imagem foi fornecida. Por favor, envie uma imagem junto com sua mensagem."
+        print(error_msg)
+        return error_msg
+    
+    print(f"  ✅ Imagem disponível para processamento: {len(image)} chars")
     
     # Validar tamanho da string de entrada (especialmente para base64)
     MAX_INPUT_SIZE = 20 * 1024 * 1024  # 20MB
@@ -160,6 +202,18 @@ def search_by_image_query(image: str, top_k: int = TOP_K) -> str:
         error_msg = f"❌ String de imagem muito grande ({len(image) / 1024 / 1024:.1f} MB). Máximo permitido: {MAX_INPUT_SIZE / 1024 / 1024:.1f} MB. Considere usar uma URI em vez de base64."
         print(error_msg)
         return error_msg
+    
+    # Verificar se a string base64 está truncada (não é múltiplo de 4)
+    if image.startswith("data:image/"):
+        if "," in image:
+            header, encoded = image.split(",", 1)
+            # Verificar se precisa padding
+            remainder = len(encoded) % 4
+            if remainder != 0:
+                print(f"  ⚠️  Base64 precisa de padding (resto: {remainder}), adicionando...")
+                encoded += "=" * (4 - remainder)
+                image = f"{header},{encoded}"
+                print(f"  ✅ Base64 corrigido, novo tamanho: {len(encoded)} chars")
     
     # Carregar modelo e vectorstore
     t0 = time.time()
@@ -191,8 +245,44 @@ def search_by_image_query(image: str, top_k: int = TOP_K) -> str:
                 print(f"⚠️  Aviso: Imagem base64 muito grande (estimado: {estimated_bytes / 1024 / 1024:.1f} MB). Isso pode causar lentidão.")
             
             t_decode = time.time()
-            header, encoded = image.split(",", 1)
-            image_bytes = base64.b64decode(encoded)
+            if "," in image:
+                header, encoded = image.split(",", 1)
+            else:
+                # Sem vírgula, pode ser apenas base64
+                header = "data:image/png;base64"
+                encoded = image
+                image = f"{header},{encoded}"
+            
+            # Verificar e corrigir padding de base64
+            remainder = len(encoded) % 4
+            if remainder != 0:
+                print(f"  ⚠️  Base64 precisa de padding (resto: {remainder}), adicionando...")
+                encoded += "=" * (4 - remainder)
+                image = f"{header},{encoded}"
+                print(f"  ✅ Base64 corrigido, novo tamanho: {len(encoded)} chars")
+            
+            # Verificar se a string parece truncada (muito pequena para uma imagem)
+            if len(encoded) < 1000:
+                print(f"  ⚠️  AVISO: String base64 muito pequena ({len(encoded)} chars). Pode estar truncada!")
+                print(f"  - Preview: {encoded[:100]}...")
+                print(f"  - Isso pode indicar que o ADK não está passando a imagem completa.")
+            
+            try:
+                image_bytes = base64.b64decode(encoded, validate=True)
+            except Exception as e:
+                print(f"  ❌ Erro ao decodificar base64: {e}")
+                print(f"  - Tamanho encoded: {len(encoded)}")
+                print(f"  - Primeiros 100 chars: {encoded[:100]}")
+                print(f"  - Últimos 100 chars: {encoded[-100:]}")
+                # Tentar sem validação
+                try:
+                    image_bytes = base64.b64decode(encoded, validate=False)
+                    print(f"  ⚠️  Decodificação sem validação funcionou")
+                except Exception as e2:
+                    error_msg = f"❌ Erro ao decodificar base64 mesmo sem validação: {e2}. A string pode estar truncada ou corrompida."
+                    print(error_msg)
+                    return error_msg
+            
             decode_time = time.time() - t_decode
             print(f"⏱️  Tempo de decodificação base64: {decode_time:.2f}s (tamanho: {len(image_bytes) / 1024:.1f} KB)")
             
