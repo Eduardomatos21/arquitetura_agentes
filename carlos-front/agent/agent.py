@@ -52,8 +52,8 @@ def extract_and_convert_images_from_contents(contents: List[Content], user_conte
     - Converte base64 ou URLs para Part com inline_data (Blob)
     
     Args:
-        contents: Lista de Content do LlmRequest
-        user_content: Conteúdo original do usuário do callback_context (opcional)
+        contents: Lista de Content do LlmRequest (fonte confiável para mensagem atual)
+        user_content: IGNORADO - pode conter dados obsoletos de mensagens anteriores
         
     Returns:
         Lista de Content modificada com imagens convertidas para Parts
@@ -63,209 +63,130 @@ def extract_and_convert_images_from_contents(contents: List[Content], user_conte
     
     modified_contents = []
     
-    # Processar user_content se disponível
-    multimodal_data = None
-    user_content_parts = None
-    if user_content is not None:
-            # Extrair partes do objeto Content
-            if isinstance(user_content, Content):
-                if hasattr(user_content, 'parts') and user_content.parts:
-                    user_content_parts = []
-                    for part in user_content.parts:
-                        # Extrair imagens de inline_data
-                        if hasattr(part, 'inline_data') and part.inline_data:
-                            blob = part.inline_data
-                            if hasattr(blob, 'data') and blob.data:
-                                mime_type = getattr(blob, 'mime_type', 'image/jpeg')
-                                image_data = blob.data
-                                new_blob = types.Blob(mime_type=mime_type, data=image_data)
-                                user_content_parts.append(types.Part(inline_data=new_blob))
-                        # Extrair texto e verificar se JSON contém imagens
-                        elif hasattr(part, 'text') and part.text:
-                            text_content = part.text
-                            
-                            try:
-                                if text_content.strip().startswith(('[', '{')):
-                                    parsed_json = json.loads(text_content)
-                                    
-                                    if isinstance(parsed_json, list):
-                                        for item in parsed_json:
-                                            if isinstance(item, dict):
-                                                if item.get("type") == "text":
-                                                    text_val = item.get("text", "")
-                                                    if text_val:
-                                                        user_content_parts.append(types.Part(text=text_val))
-                                                
-                                                elif item.get("type") == "binary" and item.get("mimeType", "").startswith("image/"):
-                                                    mime_type = item.get("mimeType", "image/jpeg")
-                                                    image_data_str = item.get("data", "")
-                                                    
-                                                    if image_data_str:
-                                                        try:
-                                                            image_data = base64.b64decode(image_data_str)
-                                                            blob = types.Blob(mime_type=mime_type, data=image_data)
-                                                            user_content_parts.append(types.Part(inline_data=blob))
-                                                        except Exception:
-                                                            pass
-                                    else:
-                                        user_content_parts.append(types.Part(text=text_content))
-                                else:
-                                    user_content_parts.append(types.Part(text=text_content))
-                            except (json.JSONDecodeError, AttributeError):
-                                user_content_parts.append(types.Part(text=text_content))
+    # Debug: Log what we're processing
+    print(f"📊 extract_and_convert_images called with {len(contents)} content(s)")
+    for i, c in enumerate(contents):
+        role = c.role if hasattr(c, 'role') else 'unknown'
+        parts_count = len(c.parts) if hasattr(c, 'parts') and c.parts else 0
+        print(f"  Content[{i}]: role={role}, parts={parts_count}")
     
     for content in contents:
+        # CRÍTICO: Limpar inline_data indevido de respostas do modelo
+        if content.role == "model":
+            if hasattr(content, 'parts') and content.parts:
+                # Verificar se há inline_data (imagem) na resposta do modelo
+                has_inline_data = any(
+                    hasattr(p, 'inline_data') and p.inline_data 
+                    for p in content.parts
+                )
+                if has_inline_data:
+                    print(f"⚠️ WARNING: Model response contains inline_data! Removing it.")
+                    # Filtrar apenas parts que NÃO são inline_data
+                    clean_parts = [
+                        p for p in content.parts 
+                        if not (hasattr(p, 'inline_data') and p.inline_data)
+                    ]
+                    if clean_parts:
+                        try:
+                            clean_content = types.Content(role=content.role, parts=clean_parts)
+                            modified_contents.append(clean_content)
+                            print(f"✅ Cleaned model content: kept {len(clean_parts)} non-image parts")
+                        except Exception as e:
+                            print(f"❌ Error creating clean model content: {e}")
+                            modified_contents.append(content)
+                    else:
+                        # Se só tinha inline_data, isso é um problema crítico
+                        print(f"❌ CRITICAL: Model content has ONLY inline_data! Keeping original.")
+                        modified_contents.append(content)
+                else:
+                    # Modelo sem inline_data - normal
+                    modified_contents.append(content)
+            else:
+                modified_contents.append(content)
+            continue
+        
         # Processar apenas mensagens do usuário
         if content.role != "user":
             modified_contents.append(content)
             continue
         
-        # Verificar se há partes que precisam ser processadas
+        # Processar APENAS as partes do content atual (não user_content obsoleto)
         new_parts = []
-        has_multimodal_content = False
         
-        # Usar partes extraídas do objeto Content
-        if user_content_parts:
-            has_multimodal_content = True
-            new_parts.extend(user_content_parts)
-        
-        # Processar multimodal_data de user_content
-        elif multimodal_data and isinstance(multimodal_data, list):
-            has_multimodal_content = True
-            for item in multimodal_data:
-                if isinstance(item, dict):
-                    # Conteúdo de texto
-                    if item.get("type") == "text":
-                        text_content = item.get("text", "")
-                        if text_content:
-                            new_parts.append(types.Part(text=text_content))
-                    
-                    # Conteúdo binário (imagem)
-                    elif item.get("type") == "binary" and item.get("mimeType", "").startswith("image/"):
-                        mime_type = item.get("mimeType", "image/jpeg")
-                        image_data = None
-                        
-                        # Tentar obter dados da imagem
-                        if "data" in item:
-                            # Dados em Base64
-                            data_str = item["data"]
-                            # Remover prefixo data:image/...;base64, se presente
-                            if "," in data_str:
-                                data_str = data_str.split(",", 1)[1]
-                            try:
-                                image_data = base64.b64decode(data_str)
-                            except Exception:
-                                continue
-                        
-                        elif "url" in item:
-                            try:
-                                response = requests.get(item["url"], timeout=30)
-                                response.raise_for_status()
-                                image_data = response.content
-                            except Exception:
-                                continue
-                        
-                        elif "id" in item:
-                            continue
-                        
-                        if image_data:
-                            blob = types.Blob(mime_type=mime_type, data=image_data)
-                            new_parts.append(types.Part(inline_data=blob))
-        
-        # Processar partes de conteúdo existentes
-        for part_idx, part in enumerate(content.parts):
-            # Pular partes já processadas do objeto Content
-            if user_content_parts:
-                if hasattr(part, 'inline_data') and part.inline_data:
-                    part_already_added = any(
-                        hasattr(p, 'inline_data') and p.inline_data and 
-                        p.inline_data.data == part.inline_data.data 
-                        for p in new_parts
-                    )
-                    if part_already_added:
-                        continue
-                elif hasattr(part, 'text') and part.text:
-                    text_already_added = any(
-                        hasattr(p, 'text') and p.text == part.text 
-                        for p in new_parts
-                    )
-                    if text_already_added:
-                        continue
-                    
-                    try:
-                        if part.text.strip().startswith(('[', '{')):
-                            parsed = json.loads(part.text)
-                            if isinstance(parsed, list):
-                                has_text_in_new = any(hasattr(p, 'text') and p.text for p in new_parts)
-                                has_image_in_new = any(hasattr(p, 'inline_data') and p.inline_data for p in new_parts)
-                                if has_text_in_new and has_image_in_new:
-                                    continue
-                    except (json.JSONDecodeError, AttributeError):
-                        pass
-            
-            # Manter partes que já possuem inline_data
+        for part in content.parts:
+            # Manter partes que já possuem inline_data (imagens já processadas)
             if hasattr(part, 'inline_data') and part.inline_data:
                 new_parts.append(part)
                 continue
             
-            # Verificar se o texto contém conteúdo AG-UI
+            # Processar texto que pode conter JSON com conteúdo AG-UI
             if hasattr(part, 'text') and part.text:
-                if has_multimodal_content and not user_content_parts:
-                    if not any(p.text for p in new_parts if hasattr(p, 'text')):
-                        new_parts.append(part)
-                    continue
+                text = part.text.strip()
                 
-                try:
-                    if part.text.strip().startswith(('[', '{')):
-                        parsed = json.loads(part.text)
+                # Tentar parsear JSON se começar com [ ou {
+                if text.startswith(('[', '{')):
+                    try:
+                        parsed = json.loads(text)
                         
+                        # Se for uma lista, processar cada item
                         if isinstance(parsed, list):
-                            has_multimodal_content = True
                             for item in parsed:
-                                if isinstance(item, dict):
-                                    if item.get("type") == "text":
-                                        text_content = item.get("text", "")
-                                        if text_content:
-                                            new_parts.append(types.Part(text=text_content))
+                                if not isinstance(item, dict):
+                                    continue
+                                
+                                # Conteúdo de texto
+                                if item.get("type") == "text":
+                                    text_content = item.get("text", "")
+                                    if text_content:
+                                        new_parts.append(types.Part(text=text_content))
+                                
+                                # Conteúdo binário (imagem)
+                                elif item.get("type") == "binary" and item.get("mimeType", "").startswith("image/"):
+                                    mime_type = item.get("mimeType", "image/jpeg")
+                                    image_data = None
                                     
-                                    elif item.get("type") == "binary" and item.get("mimeType", "").startswith("image/"):
-                                        mime_type = item.get("mimeType", "image/jpeg")
-                                        image_data = None
-                                        
-                                        if "data" in item:
-                                            data_str = item["data"]
-                                            if "," in data_str:
-                                                data_str = data_str.split(",", 1)[1]
-                                            try:
-                                                image_data = base64.b64decode(data_str)
-                                            except Exception:
-                                                continue
-                                        
-                                        elif "url" in item:
-                                            try:
-                                                response = requests.get(item["url"], timeout=30)
-                                                response.raise_for_status()
-                                                image_data = response.content
-                                            except Exception:
-                                                continue
-                                        
-                                        elif "id" in item:
+                                    # Base64 data
+                                    if "data" in item:
+                                        data_str = item["data"]
+                                        # Remover prefixo data:image/...;base64, se presente
+                                        if "," in data_str:
+                                            data_str = data_str.split(",", 1)[1]
+                                        try:
+                                            image_data = base64.b64decode(data_str)
+                                        except Exception as e:
+                                            print(f"⚠️ Erro ao decodificar base64: {e}")
                                             continue
-                                        
-                                        if image_data:
-                                            blob = types.Blob(mime_type=mime_type, data=image_data)
-                                            new_parts.append(types.Part(inline_data=blob))
+                                    
+                                    # URL da imagem
+                                    elif "url" in item:
+                                        try:
+                                            response = requests.get(item["url"], timeout=30)
+                                            response.raise_for_status()
+                                            image_data = response.content
+                                        except Exception as e:
+                                            print(f"⚠️ Erro ao baixar imagem de URL: {e}")
+                                            continue
+                                    
+                                    # Adicionar imagem se dados foram obtidos
+                                    if image_data:
+                                        blob = types.Blob(mime_type=mime_type, data=image_data)
+                                        new_parts.append(types.Part(inline_data=blob))
                         else:
+                            # JSON não é lista - manter como texto
                             new_parts.append(part)
-                    else:
+                    
+                    except json.JSONDecodeError:
+                        # Não é JSON válido - manter como texto
                         new_parts.append(part)
-                except (json.JSONDecodeError, AttributeError):
+                else:
+                    # Texto simples - manter
                     new_parts.append(part)
             else:
+                # Parte sem texto ou inline_data - manter
                 new_parts.append(part)
         
-        # Criar Content modificado se conteúdo multimodal foi processado
-        if has_multimodal_content and new_parts:
+        # Criar Content modificado se houver partes
+        if new_parts:
             try:
                 modified_content = types.Content(role=content.role, parts=new_parts)
                 modified_contents.append(modified_content)
@@ -273,6 +194,8 @@ def extract_and_convert_images_from_contents(contents: List[Content], user_conte
                 print(f"❌ Erro ao criar Content modificado: {e}")
                 modified_contents.append(content)
         else:
+            # CRÍTICO: Sem partes válidas - manter original para evitar content vazio
+            print(f"⚠️ WARNING: Content {content.role} has no parts after processing, keeping original")
             modified_contents.append(content)
     
     return modified_contents
@@ -284,6 +207,30 @@ def before_model_modifier(
     """Processa conteúdo multimodal e modifica instrução do sistema."""
     agent_name = callback_context.agent_name
     
+    # Debug: Log message count and details
+    original_content_count = len(llm_request.contents) if llm_request.contents else 0
+    print(f"🔍 Processing {original_content_count} content(s) in llm_request")
+    
+    # Debug detalhado do conteúdo
+    if llm_request.contents:
+        for i, content in enumerate(llm_request.contents):
+            role = content.role if hasattr(content, 'role') else 'unknown'
+            parts_count = len(content.parts) if hasattr(content, 'parts') and content.parts else 0
+            print(f"  Content[{i}]: role={role}, parts={parts_count}")
+            
+            if hasattr(content, 'parts') and content.parts:
+                for j, part in enumerate(content.parts):
+                    if hasattr(part, 'text') and part.text:
+                        text_preview = part.text[:80].replace('\n', ' ') if len(part.text) > 80 else part.text
+                        print(f"    Part[{j}]: text='{text_preview}...'")
+                    elif hasattr(part, 'inline_data'):
+                        print(f"    Part[{j}]: inline_data (image)")
+                    elif hasattr(part, 'function_call'):
+                        fn_name = part.function_call.name if hasattr(part.function_call, 'name') else 'unknown'
+                        print(f"    Part[{j}]: function_call={fn_name}")
+                    elif hasattr(part, 'function_response'):
+                        print(f"    Part[{j}]: function_response")
+    
     # Processar conteúdo multimodal (imagens)
     if llm_request.contents:
         user_content = getattr(callback_context, 'user_content', None)
@@ -294,26 +241,26 @@ def before_model_modifier(
                 user_content=user_content
             )
             
-            # Cachear imagens para acesso das ferramentas
-            from tools import _IMAGE_CACHE
-            images_cached = 0
-            for content in modified_contents:
-                if content.parts:
-                    for part in content.parts:
-                        if hasattr(part, 'inline_data') and part.inline_data:
-                            blob = part.inline_data
-                            if hasattr(blob, 'data') and blob.data:
-                                mime_type = getattr(blob, 'mime_type', 'image/png')
-                                image_b64 = base64.b64encode(blob.data).decode('utf-8')
-                                image_data_uri = f"data:{mime_type};base64,{image_b64}"
-                                cache_key = image_b64[:400]
-                                _IMAGE_CACHE[cache_key] = image_data_uri
-                                images_cached += 1
-            
-            if images_cached > 0:
-                print(f"✅ {images_cached} imagem(ns) processada(s) e cacheada(s) com sucesso")
-            
-            llm_request.contents = modified_contents
+            # Validar que não removemos todo o conteúdo
+            if not modified_contents:
+                print(f"❌ CRITICAL: modified_contents is EMPTY! Keeping original contents.")
+                print(f"   Original had {original_content_count} content(s)")
+                # NÃO modificar llm_request.contents - manter original
+            elif len(modified_contents) < original_content_count:
+                print(f"⚠️ WARNING: Content count decreased from {original_content_count} to {len(modified_contents)}")
+                # Verificar se algum content ficou sem parts
+                all_valid = all(
+                    hasattr(c, 'parts') and c.parts and len(c.parts) > 0 
+                    for c in modified_contents
+                )
+                if all_valid:
+                    print(f"✅ All {len(modified_contents)} contents are valid, applying changes")
+                    llm_request.contents = modified_contents
+                else:
+                    print(f"❌ Some contents are invalid (no parts), keeping original")
+            else:
+                print(f"✅ Modified contents has {len(modified_contents)} content(s), applying changes")
+                llm_request.contents = modified_contents
         except Exception as e:
             print(f"❌ Erro ao processar conteúdo multimodal: {e}")
             import traceback
@@ -403,7 +350,8 @@ histopathology_agent = LlmAgent(
         
         When the user describes histological features, use search_by_text_query(query="description", top_k=5).
         
-        CRITICAL: NEVER include raw image data (base64 strings, file paths, or URIs) in your responses to the user.
+        CRITICAL: NEVER include raw image data (base64 strings, file paths, URIs, or inline_data parts) in your responses.
+        You must ONLY respond with plain text or tool results; do not echo user images or attach blobs.
         Only present the formatted search results returned by the tool functions with similarity percentages and image identifiers.
         """,
         tools=[search_by_image_query, search_by_text_query],

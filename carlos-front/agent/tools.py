@@ -1,6 +1,7 @@
 import os
 import warnings
 import base64
+import json
 from io import BytesIO
 from urllib.parse import urlparse
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -10,7 +11,7 @@ from langchain_chroma import Chroma
 from langchain_core.embeddings import Embeddings
 from transformers import XLMRobertaTokenizer
 
-from typing import Optional
+from typing import Optional, Any
 
 # Importações ADK para acessar contexto de ferramenta
 try:
@@ -36,9 +37,6 @@ TOP_K = 5
 VECTORSTORE_DIR = "./streamlit_chroma_vectorstore_precomputed"
 cuda_device = os.environ.get("NVIDIA_VISIBLE_DEVICES", "0")
 DEVICE = torch.device(f"cuda:{cuda_device}" if torch.cuda.is_available() and cuda_device.isdigit() else "cuda:0" if torch.cuda.is_available() else "cpu")
-
-# Cache global para imagens processadas (contorna truncamento do ADK)
-_IMAGE_CACHE = {}
 
 # Singletons do modelo e vectorstore
 _MUSK_MODEL = None
@@ -115,6 +113,45 @@ def load_vectorstore():
 # ======================================
 # FERRAMENTAS DE BUSCA ADK
 # ======================================
+def _extract_image_from_context(tool_context: Optional[Any]):
+    """Recupera bytes da última imagem enviada pelo usuário via ToolContext."""
+    if tool_context is None or not TOOL_CONTEXT_AVAILABLE:
+        return None, None
+    try:
+        llm_request = getattr(tool_context, 'llm_request', None)
+        contents = getattr(llm_request, 'contents', None) or []
+        for content in reversed(contents):
+            if getattr(content, 'role', None) != 'user' or not getattr(content, 'parts', None):
+                continue
+            for part in content.parts:
+                if hasattr(part, 'inline_data') and part.inline_data and getattr(part.inline_data, 'data', None):
+                    mime = getattr(part.inline_data, 'mime_type', 'image/png')
+                    return part.inline_data.data, mime
+                if hasattr(part, 'text') and part.text:
+                    try:
+                        payload = json.loads(part.text)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if isinstance(payload, list):
+                        for item in payload:
+                            if isinstance(item, dict) and item.get('type') in {'binary', 'image_ref'}:
+                                data_field = item.get('data')
+                                if data_field:
+                                    if isinstance(data_field, str):
+                                        data_str = data_field.split(',', 1)[1] if ',' in data_field else data_field
+                                        try:
+                                            return base64.b64decode(data_str), item.get('mimeType', 'image/png')
+                                        except Exception:
+                                            continue
+                                path = item.get('path')
+                                if path and os.path.exists(path):
+                                    with open(path, 'rb') as f:
+                                        return f.read(), item.get('mimeType', 'image/png')
+        return None, None
+    except Exception:
+        return None, None
+
+
 def search_by_image_query(top_k: int = TOP_K, tool_context = None) -> str:
     """Busca imagens de lâminas histológicas semelhantes a partir de uma imagem de consulta.
     
@@ -140,49 +177,14 @@ def search_by_image_query(top_k: int = TOP_K, tool_context = None) -> str:
         >>> search_by_image_query(top_k=3)
         "Resultado #1: 85.23% de similaridade - ISIC_0053494.jpg\n..."
     """
-    # Tentar recuperar imagem do cache ou contexto
-    image = None
+    # Recuperar imagem diretamente do contexto
+    image_bytes = None
+    mime_type = 'image/png'
+    if tool_context is not None:
+        image_bytes, mime_type = _extract_image_from_context(tool_context)
     
-    # Estratégia 1: Recuperar do cache global (preenchido em before_model_modifier)
-    if _IMAGE_CACHE:
-        print(f"🔍 Cache disponível com {len(_IMAGE_CACHE)} imagem(ns)")
-        cache_key = list(_IMAGE_CACHE.keys())[0]
-        image = _IMAGE_CACHE[cache_key]
-        print(f"✅ Imagem recuperada do cache (tamanho: {len(image)} chars)")
-        print(f"📋 Formato da imagem: {image[:100]}...")
-        del _IMAGE_CACHE[cache_key]
-    
-    # Estratégia 2: Se não estiver no cache, tentar acessar do tool_context
-    elif tool_context is not None and TOOL_CONTEXT_AVAILABLE:
-        try:
-            if hasattr(tool_context, 'llm_request') and tool_context.llm_request:
-                for content in tool_context.llm_request.contents or []:
-                    if content.parts:
-                        for part in content.parts:
-                            if hasattr(part, 'inline_data') and part.inline_data:
-                                blob = part.inline_data
-                                if hasattr(blob, 'data') and blob.data:
-                                    mime_type = getattr(blob, 'mime_type', 'image/png')
-                                    image_b64 = base64.b64encode(blob.data).decode('utf-8')
-                                    image = f"data:{mime_type};base64,{image_b64}"
-                                    break
-                        if image and image.startswith("data:image/"):
-                            break
-        except Exception:
-            pass
-    
-    # Se não houver imagem, retornar erro
-    if not image:
+    if not image_bytes:
         return "❌ Nenhuma imagem foi fornecida. Por favor, envie uma imagem junto com sua mensagem."
-    
-    # Corrigir padding base64 se necessário
-    if image.startswith("data:image/"):
-        if "," in image:
-            header, encoded = image.split(",", 1)
-            remainder = len(encoded) % 4
-            if remainder != 0:
-                encoded += "=" * (4 - remainder)
-                image = f"{header},{encoded}"
     
     # Carregar modelo e vectorstore
     model, transform = load_musk_model()
@@ -196,34 +198,8 @@ def search_by_image_query(top_k: int = TOP_K, tool_context = None) -> str:
         pil_image = None
         
         # Detectar formato e carregar imagem
-        if image.startswith("data:image/"):
-            if "," in image:
-                header, encoded = image.split(",", 1)
-            else:
-                header = "data:image/png;base64"
-                encoded = image
-                image = f"{header},{encoded}"
-            
-            # Corrigir padding base64
-            remainder = len(encoded) % 4
-            if remainder != 0:
-                encoded += "=" * (4 - remainder)
-                image = f"{header},{encoded}"
-            
-            print(f"🔧 Decodificando base64 (tamanho: {len(encoded)} chars)")
-            try:
-                image_bytes = base64.b64decode(encoded, validate=True)
-                print(f"✅ Base64 decodificado com sucesso: {len(image_bytes)} bytes")
-            except Exception as e1:
-                print(f"⚠️ Falha na validação estrita: {e1}")
-                try:
-                    image_bytes = base64.b64decode(encoded, validate=False)
-                    print(f"✅ Base64 decodificado sem validação: {len(image_bytes)} bytes")
-                except Exception as e2:
-                    print(f"❌ Falha total na decodificação: {e2}")
-                    return f"❌ Erro ao decodificar base64: {e2}. A string pode estar truncada ou corrompida."
-            
-            print(f"🖼️ Abrindo imagem com PIL...")
+        if image_bytes is not None:
+            print(f"🖼️ Abrindo imagem com PIL ({len(image_bytes)} bytes)...")
             try:
                 pil_image = Image.open(BytesIO(image_bytes)).convert("RGB")
                 print(f"✅ Imagem aberta: {pil_image.size}, modo: {pil_image.mode}")
@@ -232,28 +208,14 @@ def search_by_image_query(top_k: int = TOP_K, tool_context = None) -> str:
                 import traceback
                 traceback.print_exc()
                 raise
-            
-        elif image.startswith(("http://", "https://")):
-            try:
-                import requests
-                response = requests.get(image, timeout=30)
-                response.raise_for_status()
-                pil_image = Image.open(BytesIO(response.content)).convert("RGB")
-            except ImportError:
-                return "❌ Biblioteca 'requests' não está instalada. Necessária para download de imagens HTTP/HTTPS."
-            except Exception as e:
-                return f"❌ Erro ao baixar imagem de {image}: {str(e)}"
-                
         else:
-            if not os.path.exists(image):
-                return f"❌ Arquivo de imagem não encontrado: {image}"
-            pil_image = Image.open(image).convert("RGB")
+            return "❌ Não foi possível carregar a imagem fornecida."
         
         if pil_image is None:
             return "❌ Não foi possível carregar a imagem."
             
     except FileNotFoundError:
-        return f"❌ Arquivo de imagem não encontrado: {image}"
+        return "❌ Arquivo de imagem não encontrado."
     except Exception as e:
         print(f"❌ ERRO GERAL ao processar imagem: {type(e).__name__}: {e}")
         import traceback
