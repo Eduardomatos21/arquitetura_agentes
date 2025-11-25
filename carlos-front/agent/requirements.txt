@@ -16,3 +16,4 @@ musk @ git+https://github.com/lilab-stanford/MUSK.git
 einops>=0.8.1
 fairscale>=0.4.13
 requests
+sentencepiece

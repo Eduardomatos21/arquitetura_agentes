@@ -1,8 +1,8 @@
 import { HttpAgent } from "@ag-ui/client";
 import {
-  CopilotRuntime,
-  ExperimentalEmptyAdapter,
-  copilotRuntimeNextJSAppRouterEndpoint,
+    CopilotRuntime,
+    ExperimentalEmptyAdapter,
+    copilotRuntimeNextJSAppRouterEndpoint,
 } from "@copilotkit/runtime";
 import { NextRequest } from "next/server";
  
@@ -24,17 +24,23 @@ const runtime = new CopilotRuntime({
 export const POST = async (req: NextRequest) => {
   try {
     const body = await req.json();
+    console.info("[CopilotKit API] Incoming request body parsed", {
+      hasVariables: Boolean(body?.variables),
+      messageCount: body?.variables?.data?.messages?.length ?? 0,
+    });
     
     // Transform messages to combine textMessage and imageMessage into proper format
     if (body?.variables?.data?.messages) {
       const transformedMessages: any[] = [];
       const messages = body.variables.data.messages;
+      console.info("[CopilotKit API] Transforming messages", { originalCount: messages.length });
       
       for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
         
         // If this is an imageMessage, try to find associated textMessage
         if (msg.imageMessage) {
+          console.info("[CopilotKit API] Detected imageMessage", { index: i, mimeType: msg.imageMessage.mimeType });
           // Look for a textMessage with similar timestamp (within 1 second)
           const imageTime = new Date(msg.createdAt).getTime();
           let associatedText: string | null = null;
@@ -67,6 +73,7 @@ export const POST = async (req: NextRequest) => {
               type: 'text',
               text: associatedText
             });
+            console.info("[CopilotKit API] Linked text message to image", { index: i });
           }
           
           // Add image in the format ADK expects
@@ -91,8 +98,28 @@ export const POST = async (req: NextRequest) => {
           transformedMessages.push(msg);
         }
       }
+      console.info("[CopilotKit API] Message transformation complete", { transformedCount: transformedMessages.length });
       
-      body.variables.data.messages = transformedMessages;
+      // ⚠️ IMPORTANT: send only the latest user turn (plus optional system prompt)
+      const systemMessage = transformedMessages.find(
+        (msg) => msg.textMessage && msg.textMessage.role === "system"
+      );
+      const latestUserMessage = [...transformedMessages]
+        .reverse()
+        .find((msg) => msg.textMessage && msg.textMessage.role === "user");
+
+      const prunedMessages = [] as any[];
+      if (systemMessage) prunedMessages.push(systemMessage);
+      if (latestUserMessage) prunedMessages.push(latestUserMessage);
+
+      body.variables.data.messages = prunedMessages.length
+        ? prunedMessages
+        : transformedMessages;
+      console.info("[CopilotKit API] Applied pruning", {
+        systemIncluded: Boolean(systemMessage),
+        latestUserIncluded: Boolean(latestUserMessage),
+        finalCount: body.variables.data.messages.length,
+      });
     }
     
     // Recreate request with transformed body
@@ -107,7 +134,7 @@ export const POST = async (req: NextRequest) => {
       serviceAdapter,
       endpoint: "/api/copilotkit",
     });
-
+    console.info("[CopilotKit API] Forwarding request to Copilot runtime");
     return handleRequest(clonedReq);
   } catch (error) {
     console.error("❌ [CopilotKit API] Error processing request:", error);
@@ -116,6 +143,7 @@ export const POST = async (req: NextRequest) => {
       serviceAdapter,
       endpoint: "/api/copilotkit",
     });
+    console.info("[CopilotKit API] Falling back to original request payload");
     return handleRequest(req);
   }
 };
