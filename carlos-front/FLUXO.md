@@ -148,22 +148,45 @@ Content(role="user", parts=[
       ]
     }
   ],
-  "tools": [search_by_image_query, search_by_text_query]
+  "tools": [search_by_image_query, search_by_text_query],
+  "system_instruction": """
+    ... instrução do sistema com exemplos de filtros demográficos:
+    - "mulher", "sexo feminino" → sex="female"
+    - "homem", "sexo masculino" → sex="male"
+    - "mais de 50 anos" → min_age=50
+    - "entre 40 e 60 anos" → min_age=40, max_age=60
+  """
 }
 ```
 
 ### Resposta do Gemini
 
 ```python
+# Sem filtros
 {
   "function_call": {
     "name": "search_by_image_query",
     "args": {"top_k": 5}
   }
 }
+
+# Com filtros de metadados
+{
+  "function_call": {
+    "name": "search_by_image_query",
+    "args": {
+      "top_k": 5,
+      "sex": "female",      # Detectado de "mulher" ou "feminino"
+      "min_age": 50,        # Detectado de "mais de 50 anos"
+      "max_age": 65         # Detectado de "até 65 anos"
+    }
+  }
+}
 ```
 
-**Importante:** O Gemini recebe a imagem mas **não precisa passá-la como parâmetro** para a ferramenta. A imagem é extraída automaticamente do contexto.
+**Importante:** 
+- O Gemini recebe a imagem mas **não precisa passá-la como parâmetro** para a ferramenta. A imagem é extraída automaticamente do contexto.
+- O modelo detecta filtros demográficos em **português** e os converte para parâmetros estruturados (`sex`, `min_age`, `max_age`).
 
 ---
 
@@ -235,12 +258,62 @@ with torch.inference_mode():
 query_embedding = features.cpu().numpy().flatten().tolist()
 
 # 5. Busca no Chroma (banco vetorial)
+# Se filtros aplicados, busca 3x mais candidatos para compensar filtragem
+n_results = top_k if not filters_applied else min(50, max(top_k * 3, top_k))
+
 results = collection.query(
     query_embeddings=[query_embedding],
-    n_results=top_k,
+    n_results=n_results,  # 5 sem filtros, até 50 com filtros
     include=["distances", "documents", "metadatas"]
 )
+
+# 6. Aplica filtros de metadados (se especificados)
+if filters_applied:
+    # Separa resultados que atendem os filtros (matched) dos demais (remainder)
+    matched, remainder = _filter_metadata_results(
+        candidates,
+        sex=sex,       # 'male' ou 'female'
+        min_age=min_age,  # Ex: 50
+        max_age=max_age   # Ex: 65
+    )
+    
+    # Backfill: se matched < top_k, completa com remainder para garantir top_k resultados
+    if len(matched) < top_k and remainder:
+        needed = top_k - len(matched)
+        matched.extend(remainder[:needed])
+        fallback_used = True  # Marca que alguns resultados estão "fora dos filtros"
+    
+    candidates = matched[:top_k]
+else:
+    candidates = candidates[:top_k]
 ```
+
+### Filtros de Metadados
+
+**Normalização de Sexo:**
+```python
+# Aceita variações em português e inglês
+"feminino", "mulher", "f", "female" → "female"
+"masculino", "homem", "m", "male" → "male"
+```
+
+**Filtro de Idade:**
+```python
+# Verifica age_approx ou age nos metadados
+if min_age is not None:
+    if patient_age < min_age:
+        continue  # Descarta resultado
+        
+if max_age is not None:
+    if patient_age > max_age:
+        continue  # Descarta resultado
+```
+
+**Estratégia de Backfill:**
+- Se filtros reduzem resultados para < top_k (ex: só 2 mulheres de 50-65 anos)
+- Completa com os próximos mais similares **mesmo que não atendam os filtros**
+- Marca esses resultados com "⚠️ fora dos filtros" para clareza
+- **Garante sempre top_k=5 resultados**, conforme solicitado pelo usuário
 
 ### Cálculo de Similaridade
 
@@ -260,17 +333,38 @@ for distance in raw_distances:
 
 ### Formato Retornado pela Ferramenta
 
+**Sem filtros:**
 ```python
 """
 📊 Resultados da busca por imagem (Imagem → Imagens semelhantes):
-  #01 | 94.32% de similaridade | ISIC_0053494.jpg
-  #02 | 91.15% de similaridade | ISIC_0042781.jpg
-  #03 | 88.67% de similaridade | ISIC_0038956.jpg
-  #04 | 87.21% de similaridade | ISIC_0029145.jpg
-  #05 | 85.09% de similaridade | ISIC_0051382.jpg
+  #01 | 94.32% de similaridade | ISIC_0053494 (sexo: female, idade≈55)
+  #02 | 91.15% de similaridade | ISIC_0042781 (sexo: male, idade≈42)
+  #03 | 88.67% de similaridade | ISIC_0038956 (sexo: female, idade≈61)
+  #04 | 87.21% de similaridade | ISIC_0029145 (sexo: male, idade≈38)
+  #05 | 85.09% de similaridade | ISIC_0051382 (sexo: female, idade≈50)
 ————————————————————————————————————————————————
 """
 ```
+
+**Com filtros aplicados:**
+```python
+"""
+📊 Resultados da busca por imagem (Imagem → Imagens semelhantes):
+  ↳ Filtros aplicados: sexo: feminino, idade mínima: 50 anos
+  #01 | 94.32% de similaridade | ISIC_0053494 (sexo: female, idade≈55)
+  #02 | 88.67% de similaridade | ISIC_0038956 (sexo: female, idade≈61)
+  #03 | 85.09% de similaridade | ISIC_0051382 (sexo: female, idade≈50)
+  #04 | 82.45% de similaridade | ISIC_0067821 (sexo: male, idade≈42, ⚠️ fora dos filtros)
+  #05 | 81.12% de similaridade | ISIC_0045392 (sexo: female, idade≈48, ⚠️ fora dos filtros)
+————————————————————————————————————————————————
+"""
+```
+
+**Notas sobre os resultados:**
+- Sempre retorna exatamente `top_k` resultados (padrão: 5)
+- Metadados (sexo, idade) sempre exibidos quando disponíveis
+- Resultados que não atendem filtros são marcados com "⚠️ fora dos filtros"
+- Se filtros reduzem < top_k, completa com próximos mais similares (backfill)
 
 ### Fluxo Gemini → Frontend
 
@@ -410,8 +504,13 @@ const prunedMessages = [systemMessage, latestUserMessage].filter(Boolean);
 │  2. Resize se > 2048px                                          │
 │  3. Transform → Tensor (384x384, normalizado)                   │
 │  4. MUSK model → Embedding (768 dimensões)                      │
-│  5. Chroma.query(embedding) → Top 5 resultados                  │
-│  6. Calcula similaridade: (1 - L2_dist/2) * 100                 │
+│  5. Chroma.query(embedding, n_results=5 ou até 100)              │
+│  6. NOVO: Aplica filtros de metadados se sex/min_age/max_age    │
+│     - Separa matched (atendem filtros) e remainder              │
+│     - Se matched < top_k, completa com remainder (backfill)     │
+│     - Marca resultados fora dos filtros com ⚠️                  │
+│  7. Calcula similaridade: (1 - L2_dist/2) * 100                 │
+│  8. Formata com metadados: sexo, idade≈X                        │
 └────────────────────────┬────────────────────────────────────────┘
                          │ formatted_results (string)
                          ▼
@@ -435,23 +534,62 @@ const prunedMessages = [systemMessage, latestUserMessage].filter(Boolean);
 
 ## 💡 Casos de Uso Suportados
 
-### **1. Busca por Imagem**
+### **1. Busca por Imagem (Simples)**
 
 ```
 User: [uploads image]
 Agent: search_by_image_query(top_k=5)
-Result: Top 5 imagens similares com percentuais
+Result: Top 5 imagens similares com percentuais + metadados (sexo, idade)
 ```
 
-### **2. Busca por Texto**
+### **2. Busca por Imagem com Filtro de Sexo**
+
+```
+User: [uploads image] "busque apenas em mulheres"
+Agent: search_by_image_query(top_k=5, sex="female")
+Result: Top 5 imagens de pacientes do sexo feminino
+        (com backfill se < 5 encontradas, marcadas com ⚠️)
+```
+
+### **3. Busca por Imagem com Filtro de Idade**
+
+```
+User: [uploads image] "pacientes acima de 50 anos"
+Agent: search_by_image_query(top_k=5, min_age=50)
+Result: Top 5 imagens de pacientes com idade ≥ 50
+```
+
+### **4. Busca por Imagem com Filtros Combinados**
+
+```
+User: [uploads image] "homens entre 40 e 60 anos"
+Agent: search_by_image_query(top_k=5, sex="male", min_age=40, max_age=60)
+Result: Top 5 imagens de pacientes masculinos de 40-60 anos
+        (completa com outros se insuficientes)
+```
+
+### **5. Busca por Texto**
 
 ```
 User: "find images with melanoma characteristics"
-Agent: search_by_text_query(query="melanoma characteristics", top_k=5)
+Agent: search_by_text_query(text_query="melanoma characteristics", top_k=5)
 Result: Top 5 imagens correspondentes à descrição
 ```
 
-### **3. Follow-up sem Reenviar Imagem**
+### **6. Busca por Texto com Filtros**
+
+```
+User: "melanoma em mulheres acima de 55 anos"
+Agent: search_by_text_query(
+         text_query="melanoma",
+         sex="female",
+         min_age=55,
+         top_k=5
+       )
+Result: Top 5 imagens de melanoma em pacientes femininas com idade ≥ 55
+```
+
+### **7. Follow-up sem Reenviar Imagem**
 
 ```
 User: [uploads image] "analyze this"
@@ -461,7 +599,7 @@ User: "now search for melanoma"
 Agent: [uses cached image from session_state]
 ```
 
-### **4. Mensagem Curta + Imagem**
+### **8. Mensagem Curta + Imagem**
 
 ```
 User: [uploads image] "a"  # Mensagem de 1 letra
@@ -571,6 +709,10 @@ AGENT_NAME = "histopathology_agent"
 ✅ Sanitização de respostas (previne erros)  
 ✅ Pruning de mensagens (economia de tokens)  
 ✅ Suporta follow-up queries sem reenvio  
+✅ **Filtros de metadados** (sexo, idade) com detecção em português  
+✅ **Backfill automático** garante sempre top_k resultados  
+✅ **Transparência:** marca resultados fora dos filtros com ⚠️  
+✅ **Exibe metadados** (sexo, idade≈X) em todos os resultados  
 
 ### Limitações
 
@@ -578,3 +720,5 @@ AGENT_NAME = "histopathology_agent"
 ⚠️ Cache limitado a 32 arquivos  
 ⚠️ Requer CUDA para performance ideal  
 ⚠️ Dependência de API do Google (Gemini)  
+⚠️ **Filtros podem ser "relaxados"** via backfill se poucos resultados atendem critérios  
+⚠️ **Metadados ausentes** em algumas imagens causam exclusão nos filtros  

@@ -13,7 +13,7 @@ from langchain_chroma import Chroma
 from langchain_core.embeddings import Embeddings
 from transformers import XLMRobertaTokenizer
 
-from typing import Optional, Any
+from typing import Optional, Any, Iterable, List, Tuple
 
 # Logger configurado localmente para evitar configuração global acidental
 logger = logging.getLogger("histopathology.tools")
@@ -54,6 +54,150 @@ DEVICE = torch.device(f"cuda:{cuda_device}" if torch.cuda.is_available() and cud
 _MUSK_MODEL = None
 _MUSK_TRANSFORM = None
 _VECTORSTORE = None
+
+
+# ======================================
+# AJUDANTES DE FILTRO POR METADADOS
+# ======================================
+def _normalize_sex_filter(value: Optional[str]) -> Optional[str]:
+    """Normaliza valores de sexo para 'male' ou 'female'."""
+    if value is None:
+        return None
+
+    mapping = {
+        "f": "female",
+        "feminino": "female",
+        "feminina": "female",
+        "mulher": "female",
+        "female": "female",
+        "m": "male",
+        "masculino": "male",
+        "masculina": "male",
+        "homem": "male",
+        "male": "male",
+    }
+
+    normalized = value.strip().lower()
+    sex = mapping.get(normalized)
+    if sex is None and normalized in {"masculine", "feminine"}:
+        sex = "male" if normalized.startswith("masc") else "female"
+    if sex is None:
+        logger.warning("Ignoring unsupported sex filter value: %s", value)
+    return sex
+
+
+def _coerce_age(value: Optional[Any]) -> Optional[int]:
+    """Converte entrada arbitrária em inteiro, se possível."""
+    if value is None:
+        return None
+    try:
+        # Strings como "55 anos" ou "idade>60" são comuns; extrair dígitos
+        if isinstance(value, str):
+            digits = "".join(ch for ch in value if ch.isdigit())
+            value = digits or value
+        return int(value)
+    except (ValueError, TypeError):
+        logger.warning("Ignoring invalid age value: %s", value)
+        return None
+
+
+def _prepare_filters(sex: Optional[str], min_age: Optional[Any], max_age: Optional[Any]):
+    """Normaliza filtros e garante consistência."""
+    normalized_sex = _normalize_sex_filter(sex)
+    normalized_min_age = _coerce_age(min_age)
+    normalized_max_age = _coerce_age(max_age)
+
+    if (
+        normalized_min_age is not None
+        and normalized_max_age is not None
+        and normalized_min_age > normalized_max_age
+    ):
+        logger.info(
+            "Swapping min/max age to maintain order (min=%s max=%s)",
+            normalized_min_age,
+            normalized_max_age,
+        )
+        normalized_min_age, normalized_max_age = normalized_max_age, normalized_min_age
+
+    return normalized_sex, normalized_min_age, normalized_max_age
+
+
+MetadataResult = Tuple[str, float, dict]
+
+
+def _metadata_matches_filters(
+    metadata: Optional[dict],
+    sex: Optional[str],
+    min_age: Optional[int],
+    max_age: Optional[int],
+) -> bool:
+    """Retorna True se os metadados atendem aos filtros solicitados."""
+    metadata = metadata or {}
+    patient_sex = metadata.get("sex")
+    patient_age = metadata.get("age_approx")
+    if patient_age is None:
+        patient_age = metadata.get("age")
+
+    if patient_sex:
+        patient_sex = str(patient_sex).strip().lower()
+    if patient_age is not None:
+        try:
+            patient_age = int(float(patient_age))
+        except (ValueError, TypeError):
+            patient_age = None
+
+    if sex is not None:
+        if patient_sex is None:
+            return False
+        if patient_sex not in {"male", "female"}:
+            patient_sex = _normalize_sex_filter(patient_sex)
+        if patient_sex != sex:
+            return False
+
+    if min_age is not None:
+        if patient_age is None or patient_age < min_age:
+            return False
+
+    if max_age is not None:
+        if patient_age is None or patient_age > max_age:
+            return False
+
+    return True
+
+
+def _filter_metadata_results(
+    candidates: Iterable[MetadataResult],
+    sex: Optional[str],
+    min_age: Optional[int],
+    max_age: Optional[int],
+) -> Tuple[List[MetadataResult], List[MetadataResult]]:
+    """Separa resultados que atendem aos filtros e os demais."""
+    matched: List[MetadataResult] = []
+    remainder: List[MetadataResult] = []
+
+    for doc_path, distance, metadata in candidates:
+        if _metadata_matches_filters(metadata, sex, min_age, max_age):
+            matched.append((doc_path, distance, metadata))
+        else:
+            remainder.append((doc_path, distance, metadata))
+
+    return matched, remainder
+
+
+def _summarize_filters(sex: Optional[str], min_age: Optional[int], max_age: Optional[int]) -> Optional[str]:
+    """Gera texto breve com os filtros aplicados."""
+    parts = []
+    if sex == "female":
+        parts.append("sexo: feminino")
+    elif sex == "male":
+        parts.append("sexo: masculino")
+    if min_age is not None and max_age is not None:
+        parts.append(f"idade aproximada: {min_age}-{max_age} anos")
+    elif min_age is not None:
+        parts.append(f"idade mínima: {min_age} anos")
+    elif max_age is not None:
+        parts.append(f"idade máxima: {max_age} anos")
+    return ", ".join(parts) if parts else None
 
 # ======================================
 # EMBEDDINGS PLACEHOLDER (apenas para query)
@@ -187,7 +331,13 @@ def _extract_image_from_context(tool_context: Optional[Any]):
     return None, None
 
 
-def search_by_image_query(top_k: int = TOP_K, tool_context = None) -> str:
+def search_by_image_query(
+    top_k: int = TOP_K,
+    sex: Optional[str] = None,
+    min_age: Optional[Any] = None,
+    max_age: Optional[Any] = None,
+    tool_context = None,
+) -> str:
     """Busca imagens de lâminas histológicas semelhantes a partir de uma imagem de consulta.
     
     Esta ferramenta utiliza o modelo MUSK (Multimodal Universal Search with Knowledge) para
@@ -199,7 +349,11 @@ def search_by_image_query(top_k: int = TOP_K, tool_context = None) -> str:
     que é preenchido quando o usuário envia uma imagem.
     
     Args:
-        top_k: Número de resultados similares a retornar. Padrão é 5.
+          top_k: Número de resultados similares a retornar. Padrão é 5.
+          sex: Filtra por sexo biológico registrado no dataset ("female" ou "male").
+              Aceita variantes em português como "feminino" ou "masculino".
+          min_age: Idade mínima aproximada do paciente (inteiro).
+          max_age: Idade máxima aproximada do paciente (inteiro).
         tool_context: Contexto da ferramenta (fornecido automaticamente pelo ADK).
     
     Returns:
@@ -215,7 +369,15 @@ def search_by_image_query(top_k: int = TOP_K, tool_context = None) -> str:
     # Recuperar imagem diretamente do contexto
     image_bytes = None
     mime_type = 'image/png'
-    logger.info("search_by_image_query invoked with top_k=%s", top_k)
+    sex, min_age, max_age = _prepare_filters(sex, min_age, max_age)
+    filters_applied = any(v is not None for v in (sex, min_age, max_age))
+    logger.info(
+        "search_by_image_query invoked top_k=%s sex=%s min_age=%s max_age=%s",
+        top_k,
+        sex,
+        min_age,
+        max_age,
+    )
     if tool_context is not None:
         logger.info("ToolContext provided; attempting inline extraction")
         image_bytes, mime_type = _extract_image_from_context(tool_context)
@@ -288,9 +450,10 @@ def search_by_image_query(top_k: int = TOP_K, tool_context = None) -> str:
         logger.info("Image embedding length=%s l2_norm=%.4f", len(query_embedding), norm)
         
         try:
+            n_results = top_k if not filters_applied else 100
             raw = collection.query(
                 query_embeddings=[query_embedding],
-                n_results=top_k,
+                n_results=n_results,
                 include=["distances", "documents", "metadatas"],
             )
         except Exception as raw_error:
@@ -300,14 +463,77 @@ def search_by_image_query(top_k: int = TOP_K, tool_context = None) -> str:
         raw_distances = raw.get("distances", [[]])[0]
         raw_metadatas = raw.get("metadatas", [[]])[0]
         logger.info("Chroma returned %s raw document(s) for image query", len(raw_documents))
+        candidates = list(zip(raw_documents, raw_distances, raw_metadatas))
+
+        fallback_used = False
+        if filters_applied:
+            matched, remainder = _filter_metadata_results(
+                candidates,
+                sex,
+                min_age,
+                max_age,
+            )
+            if len(matched) < top_k and remainder:
+                needed = top_k - len(matched)
+                matched.extend(remainder[:needed])
+                fallback_used = True
+            candidates = matched[:top_k]
+            logger.info(
+                "Image query after filters yielded %s match(es); fallback_used=%s",
+                len(candidates),
+                fallback_used,
+            )
+        else:
+            candidates = candidates[:top_k]
+
+        if not candidates:
+            filter_msg = _summarize_filters(sex, min_age, max_age)
+            if filter_msg:
+                return (
+                    "⚠️ Nenhum resultado encontrado com os filtros aplicados. "
+                    f"Filtros: {filter_msg}. Tente ajustar ou remover os filtros."
+                )
+            logger.warning("No raw documents returned for image query")
+            return "⚠️ Nenhuma imagem semelhante foi encontrada." 
 
         # Formatar resultados como string legível
         result_lines = [f"\n📊 Resultados da busca por imagem (Imagem → Imagens semelhantes):"]
-        for i, (doc_path, distance, metadata) in enumerate(zip(raw_documents, raw_distances, raw_metadatas), start=1):
+        filter_summary = _summarize_filters(sex, min_age, max_age)
+        if filter_summary:
+            result_lines.append(f"  ↳ Filtros aplicados: {filter_summary}")
+            if fallback_used:
+                result_lines.append(
+                    "  ↳ Alguns resultados adicionais não atendem totalmente aos filtros; listados para completar o top_k."
+                )
+        elif fallback_used:
+            fallback_used = False  # Segurança; não deve ocorrer sem filtros.
+
+        for i, (doc_path, distance, metadata) in enumerate(candidates, start=1):
             similarity_percent = max(0, (1 - distance / 2) * 100)
             doc_label = metadata.get("isic_id") if isinstance(metadata, dict) else None
             display = doc_label or doc_path
-            result_line = f"  #{i:02d} | {similarity_percent:.2f}% de similaridade | {display}"
+            patient_sex = metadata.get("sex") if isinstance(metadata, dict) else None
+            patient_age = metadata.get("age_approx") if isinstance(metadata, dict) else None
+            if patient_age is None and isinstance(metadata, dict):
+                patient_age = metadata.get("age")
+            try:
+                patient_age = int(float(patient_age)) if patient_age is not None else None
+            except (ValueError, TypeError):
+                patient_age = None
+            matches_filters = (
+                not filters_applied or _metadata_matches_filters(metadata, sex, min_age, max_age)
+            )
+            extra_bits = []
+            if patient_sex:
+                extra_bits.append(f"sexo: {patient_sex}")
+            if patient_age is not None:
+                extra_bits.append(f"idade≈{patient_age}")
+            if filters_applied and not matches_filters:
+                extra_bits.append("⚠️ fora dos filtros")
+            extras = f" ({', '.join(extra_bits)})" if extra_bits else ""
+            result_line = (
+                f"  #{i:02d} | {similarity_percent:.2f}% de similaridade | {display}{extras}"
+            )
             result_lines.append(result_line)
             logger.info(
                 "Image result #%s distance=%.4f similarity=%.2f doc=%s",
@@ -316,11 +542,9 @@ def search_by_image_query(top_k: int = TOP_K, tool_context = None) -> str:
                 similarity_percent,
                 display,
             )
-        if not raw_documents:
-            logger.warning("No raw documents returned for image query")
         result_lines.append("—" * 60)
         logger.info("Formatted image search response with %s entries", len(result_lines) - 2)
-        
+
         return "\n".join(result_lines)
     
     except Exception as e:
@@ -328,7 +552,13 @@ def search_by_image_query(top_k: int = TOP_K, tool_context = None) -> str:
         return f"❌ Erro ao processar imagem: {str(e)}"
 
 
-def search_by_text_query(text_query: str, top_k: int = TOP_K) -> str:
+def search_by_text_query(
+    text_query: str,
+    top_k: int = TOP_K,
+    sex: Optional[str] = None,
+    min_age: Optional[Any] = None,
+    max_age: Optional[Any] = None,
+) -> str:
     """Busca imagens de lâminas histológicas a partir de uma descrição textual.
     
     Esta ferramenta utiliza o modelo MUSK (Multimodal Universal Search with Knowledge) para
@@ -340,7 +570,11 @@ def search_by_text_query(text_query: str, top_k: int = TOP_K) -> str:
         text_query: Descrição textual da lâmina histológica ou características a buscar.
                    Exemplos: "prostate adenocarcinoma with cribriform pattern",
                    "melanoma with dermal invasion", "benign nevus".
-        top_k: Número de resultados similares a retornar. Padrão é 5.
+          top_k: Número de resultados similares a retornar. Padrão é 5.
+          sex: Filtra por sexo biológico registrado no dataset ("female" ou "male").
+              Aceita variantes em português como "feminino" ou "masculino".
+          min_age: Idade mínima aproximada do paciente (inteiro).
+          max_age: Idade máxima aproximada do paciente (inteiro).
     
     Returns:
         String formatada contendo os resultados da busca, incluindo:
@@ -352,7 +586,16 @@ def search_by_text_query(text_query: str, top_k: int = TOP_K) -> str:
         >>> search_by_text_query("prostate adenocarcinoma with cribriform pattern", top_k=3)
         "Resultado #1: 92.15% de similaridade - ISIC_0053494.jpg\n..."
     """
-    logger.info("search_by_text_query invoked with top_k=%s query='%s'", top_k, text_query[:80])
+    sex, min_age, max_age = _prepare_filters(sex, min_age, max_age)
+    filters_applied = any(v is not None for v in (sex, min_age, max_age))
+    logger.info(
+        "search_by_text_query invoked top_k=%s sex=%s min_age=%s max_age=%s query='%s'",
+        top_k,
+        sex,
+        min_age,
+        max_age,
+        text_query[:80],
+    )
     model, _ = load_musk_model()
     vectorstore = load_vectorstore()
     collection = getattr(vectorstore, "_collection", None) if vectorstore else None
@@ -379,9 +622,10 @@ def search_by_text_query(text_query: str, top_k: int = TOP_K) -> str:
         norm = math.sqrt(sum(x * x for x in query_embedding))
         logger.info("Text embedding length=%s l2_norm=%.4f", len(query_embedding), norm)
         try:
+            n_results = top_k if not filters_applied else 100
             raw = collection.query(
                 query_embeddings=[query_embedding],
-                n_results=top_k,
+                n_results=n_results,
                 include=["distances", "documents", "metadatas"],
             )
         except Exception as raw_error:
@@ -391,14 +635,77 @@ def search_by_text_query(text_query: str, top_k: int = TOP_K) -> str:
         raw_distances = raw.get("distances", [[]])[0]
         raw_metadatas = raw.get("metadatas", [[]])[0]
         logger.info("Chroma returned %s raw document(s) for text query", len(raw_documents))
+        candidates = list(zip(raw_documents, raw_distances, raw_metadatas))
+
+        fallback_used = False
+        if filters_applied:
+            matched, remainder = _filter_metadata_results(
+                candidates,
+                sex,
+                min_age,
+                max_age,
+            )
+            if len(matched) < top_k and remainder:
+                needed = top_k - len(matched)
+                matched.extend(remainder[:needed])
+                fallback_used = True
+            candidates = matched[:top_k]
+            logger.info(
+                "Text query after filters yielded %s match(es); fallback_used=%s",
+                len(candidates),
+                fallback_used,
+            )
+        else:
+            candidates = candidates[:top_k]
+
+        if not candidates:
+            filter_msg = _summarize_filters(sex, min_age, max_age)
+            if filter_msg:
+                return (
+                    "⚠️ Nenhum resultado encontrado com os filtros aplicados. "
+                    f"Filtros: {filter_msg}. Tente ajustar ou remover os filtros."
+                )
+            logger.warning("No raw documents returned for text query")
+            return "⚠️ Nenhuma imagem correspondente foi encontrada." 
 
         # Formatar resultados como string legível
         result_lines = [f"\n📊 Resultados da busca textual (Texto → Imagens correspondentes):"]
-        for i, (doc_path, distance, metadata) in enumerate(zip(raw_documents, raw_distances, raw_metadatas), start=1):
+        filter_summary = _summarize_filters(sex, min_age, max_age)
+        if filter_summary:
+            result_lines.append(f"  ↳ Filtros aplicados: {filter_summary}")
+            if fallback_used:
+                result_lines.append(
+                    "  ↳ Alguns resultados adicionais não atendem totalmente aos filtros; listados para completar o top_k."
+                )
+        elif fallback_used:
+            fallback_used = False
+
+        for i, (doc_path, distance, metadata) in enumerate(candidates, start=1):
             similarity_percent = max(0, (1 - distance / 2) * 100)
             doc_label = metadata.get("isic_id") if isinstance(metadata, dict) else None
             display = doc_label or doc_path
-            result_line = f"  #{i:02d} | {similarity_percent:.2f}% de similaridade | {display}"
+            patient_sex = metadata.get("sex") if isinstance(metadata, dict) else None
+            patient_age = metadata.get("age_approx") if isinstance(metadata, dict) else None
+            if patient_age is None and isinstance(metadata, dict):
+                patient_age = metadata.get("age")
+            try:
+                patient_age = int(float(patient_age)) if patient_age is not None else None
+            except (ValueError, TypeError):
+                patient_age = None
+            matches_filters = (
+                not filters_applied or _metadata_matches_filters(metadata, sex, min_age, max_age)
+            )
+            extra_bits = []
+            if patient_sex:
+                extra_bits.append(f"sexo: {patient_sex}")
+            if patient_age is not None:
+                extra_bits.append(f"idade≈{patient_age}")
+            if filters_applied and not matches_filters:
+                extra_bits.append("⚠️ fora dos filtros")
+            extras = f" ({', '.join(extra_bits)})" if extra_bits else ""
+            result_line = (
+                f"  #{i:02d} | {similarity_percent:.2f}% de similaridade | {display}{extras}"
+            )
             result_lines.append(result_line)
             logger.info(
                 "Text result #%s distance=%.4f similarity=%.2f doc=%s",
@@ -407,29 +714,13 @@ def search_by_text_query(text_query: str, top_k: int = TOP_K) -> str:
                 similarity_percent,
                 display,
             )
-        if not raw_documents:
-            logger.warning("No raw documents returned for text query")
         result_lines.append("—" * 60)
         logger.info("Formatted text search response with %s entries", len(result_lines) - 2)
-        
+
         return "\n".join(result_lines)
     
     except Exception as e:
         logger.exception("Unhandled error during text search: %s", e)
         return f"❌ Erro ao processar consulta textual: {str(e)}"
-
-
-# # ======================================
-# # EXECUÇÃO MANUAL (TESTES)
-# # ======================================
-# if __name__ == "__main__":
-#     image_path = "ISIC_0053494.jpg"  # substitua pelo caminho real no container
-#     if os.path.exists(image_path):
-#         search_by_image_query(image_path, top_k=TOP_K)
-#     else:
-#         print(f"⚠️ Caminho da imagem de teste não encontrado: {image_path}")
-
-#     # 🔹 Busca textual de teste
-#     query = "prostate adenocarcinoma with cribriform pattern"
-#     search_by_text_query(query, top_k=TOP_K)
     
+#TODO: Adicionar ferramenta de filtro por padrão morfológico

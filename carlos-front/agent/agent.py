@@ -313,7 +313,18 @@ def before_model_modifier(
         The image will be automatically extracted from the user's message context.
         Just call: search_by_image_query(top_k=5)
         
-        When the user describes histological features in text, use search_by_text_query with the text description.
+        When the user describes histological features in text, use search_by_text_query(text_query="descrição", top_k=5).
+
+        If the user mentions demographic filters (e.g., "mulher", "sexo feminino", "homem", "masculino") pass the parameter
+        sex="female" or sex="male" respectively.
+
+        Age filters must use the parameters min_age and/or max_age. Interpret phrases like "mais de 50 anos" as min_age=50,
+        "menos de 30" as max_age=30, and "entre 40 e 60" as min_age=40, max_age=60. Support Portuguese variations such as
+        "idade > 50", "com 55 anos", or "faixa etária 45-65".
+
+        Examples:
+        - Para texto: search_by_text_query(text_query="descrição", sex="female", min_age=50)
+        - Para imagem: search_by_image_query(top_k=5, sex="male", max_age=30)
         
         IMPORTANT: If the user sends a very short message (like a single letter) along with an image,
         interpret it as a request to analyze the image and search for similar ones.
@@ -383,7 +394,8 @@ def simple_after_model_modifier(
             logger.info("simple_after_model_modifier completed for agent=%s", agent_name)
     return None
 
-
+# TODO: Definir diferença de filtro para padrões morfológicos específicos
+# TODO: Verificar MedGemma
 histopathology_agent = LlmAgent(
         name="histopathology_agent",
         model="gemini-2.5-flash",
@@ -394,7 +406,15 @@ histopathology_agent = LlmAgent(
         When the user provides an image, use search_by_image_query(top_k=5) WITHOUT passing the image as a parameter.
         The image will be automatically extracted from the message context.
         
-        When the user describes histological features, use search_by_text_query(query="description", top_k=5).
+        When the user describes histological features, use search_by_text_query(text_query="descrição", top_k=5).
+
+        Always honor demographic filters mentioned pelo usuário:
+        - "mulher", "sexo feminino" ou similares ⇒ sex="female"
+        - "homem", "sexo masculino" ou similares ⇒ sex="male"
+        - "mais de 50 anos" ⇒ min_age=50
+        - "menos de 30 anos" ⇒ max_age=30
+        - "entre 40 e 60 anos" ⇒ min_age=40 e max_age=60
+        Combine filtros conforme necessário tanto para imagens quanto texto.
         
         CRITICAL: NEVER include raw image data (base64 strings, file paths, URIs, or inline_data parts) in your responses.
         You must ONLY respond with plain text or tool results; do not echo user images or attach blobs.
