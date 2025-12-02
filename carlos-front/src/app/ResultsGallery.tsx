@@ -5,7 +5,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 export type SearchResultItem = {
   rank: number;
   similarity: number;
-  isicId: string;
+  imageId: string;
+  displayLabel?: string | null;
+  imageExt?: string | null;
+  caseCode?: string | null;
+  slideCode?: string | null;
   documentPath?: string;
   sex?: string | null;
   ageApprox?: number | string | null;
@@ -61,13 +65,18 @@ function MagnifierIcon({ className }: { className?: string }) {
 }
 
 function toImageId(sourceId: string): string {
-  const fileName = sourceId.split('/').pop() ?? sourceId;
+  const normalized = sourceId.replace(/\\/g, '/');
+  const fileName = normalized.split('/').pop() ?? normalized;
   const withoutExtension = fileName.replace(/\.[^.]+$/, '');
   return withoutExtension;
 }
 
-function buildImageUrl(isicId: string): string {
-  return `/api/images/${encodeURIComponent(toImageId(isicId))}`;
+function buildImageUrl(result: SearchResultItem): string {
+  const primarySlug = result.imageId ? toImageId(result.imageId) : null;
+  const pathSlug = result.documentPath ? toImageId(result.documentPath) : null;
+  const labelSlug = result.displayLabel ? toImageId(result.displayLabel) : null;
+  const slugSource = primarySlug || pathSlug || labelSlug || `result-${result.rank}`;
+  return `/api/images/${encodeURIComponent(slugSource)}`;
 }
 
 function formatSimilarity(value: number): string {
@@ -87,10 +96,23 @@ function ResultCard({
   onSelect: (value: { result: SearchResultItem; imageUrl: string }) => void;
 }) {
   const [imageError, setImageError] = useState(false);
-  const imageUrl = useMemo(() => buildImageUrl(result.isicId), [result.isicId]);
+  const imageUrl = useMemo(
+    () => buildImageUrl(result),
+    [result.imageId, result.displayLabel, result.documentPath, result.rank],
+  );
   const diagnosis = result.diagnosisPrimary || result.diagnosisSecondary || result.diagnosisTertiary;
   const anatomy = result.anatomSiteSpecial || result.anatomSiteGeneral;
   const cardAccent = `${themeColor}33`;
+  const identifier = result.caseCode || result.displayLabel || result.imageId;
+  const secondaryIdentifier = (() => {
+    if (result.caseCode && result.displayLabel && result.displayLabel !== result.caseCode) {
+      return result.displayLabel;
+    }
+    if (result.slideCode && result.slideCode !== result.caseCode) {
+      return result.slideCode;
+    }
+    return null;
+  })();
 
   return (
     <button
@@ -103,7 +125,7 @@ function ResultCard({
         {!imageError ? (
           <img
             src={imageUrl}
-            alt={`Lâmina ${result.isicId}`}
+            alt={`Lâmina ${identifier}`}
             className="h-full w-full object-cover transition group-hover:scale-105"
             onError={() => setImageError(true)}
           />
@@ -121,10 +143,16 @@ function ResultCard({
       </div>
       <div className="flex flex-col gap-1 text-white/90">
         <p className="text-sm font-semibold uppercase tracking-wide text-white/90">
-          {toImageId(result.isicId)}
+          {identifier}
         </p>
+        {secondaryIdentifier && (
+          <p className="text-xs uppercase tracking-wide text-white/60">{secondaryIdentifier}</p>
+        )}
         {diagnosis && <p className="text-sm text-white/80">{diagnosis}</p>}
         <div className="flex flex-wrap gap-2 text-xs text-white/70">
+          {result.slideCode && (
+            <span className="rounded-full bg-white/10 px-2 py-1">{`Slide: ${result.slideCode}`}</span>
+          )}
           {result.sex && (
             <span className="rounded-full bg-white/10 px-2 py-1">{`Sexo: ${result.sex}`}</span>
           )}
@@ -205,6 +233,16 @@ function ImagePreviewModal({
   const { result, imageUrl } = modal;
   const diagnosis = result.diagnosisPrimary || result.diagnosisSecondary || result.diagnosisTertiary;
   const anatomy = result.anatomSiteSpecial || result.anatomSiteGeneral;
+  const identifier = result.caseCode || result.displayLabel || result.imageId;
+  const secondaryIdentifier = (() => {
+    if (result.caseCode && result.displayLabel && result.displayLabel !== result.caseCode) {
+      return result.displayLabel;
+    }
+    if (result.slideCode && result.slideCode !== result.caseCode) {
+      return result.slideCode;
+    }
+    return null;
+  })();
 
   return (
     <div
@@ -237,7 +275,10 @@ function ImagePreviewModal({
           <div className="flex flex-col gap-4 md:gap-5">
             <div className="rounded-2xl bg-white/10 p-4 text-sm text-white/80 sm:p-5">
               <p className="text-xs uppercase tracking-[0.2em] text-white/60">Identificador</p>
-              <p className="text-lg font-semibold text-white">{toImageId(result.isicId)}</p>
+              <p className="text-lg font-semibold text-white">{identifier}</p>
+              {secondaryIdentifier && (
+                <p className="text-xs uppercase tracking-wide text-white/60">{secondaryIdentifier}</p>
+              )}
               <p className="text-sm text-white/70">Similaridade: {formatSimilarity(result.similarity)}</p>
               {result.matchedFilters === false && (
                 <p className="mt-2 rounded-md bg-amber-500/20 px-3 py-2 text-amber-200">
@@ -248,6 +289,8 @@ function ImagePreviewModal({
             <div className="rounded-2xl bg-white/10 p-4 text-sm sm:p-5">
               <h3 className="text-sm font-semibold uppercase tracking-wide text-white/70">Detalhes do paciente</h3>
               <ul className="mt-2 space-y-1 text-white/80">
+                <li>Código do caso: {result.caseCode ?? '—'}</li>
+                <li>Código do slide: {result.slideCode ?? '—'}</li>
                 <li>Sexo: {result.sex ?? '—'}</li>
                 <li>Idade aproximada: {result.ageApprox ?? '—'}</li>
                 <li>Local anatômico: {anatomy ?? '—'}</li>
@@ -267,7 +310,7 @@ function ImagePreviewModal({
               {!imageError ? (
                 <img
                   src={imageUrl}
-                  alt={`Pré-visualização da lâmina ${result.isicId}`}
+                  alt={`Pré-visualização da lâmina ${identifier}`}
                   className="h-full w-full object-contain"
                   onError={() => setImageError(true)}
                 />
@@ -317,7 +360,7 @@ function ImagePreviewModal({
             </button>
             <img
               src={imageUrl}
-              alt={`Ampliação da lâmina ${result.isicId}`}
+              alt={`Ampliação da lâmina ${identifier}`}
               className="max-h-[75vh] w-full max-w-full rounded-3xl border border-white/20 object-contain sm:max-h-full"
             />
           </div>
@@ -385,7 +428,7 @@ export function ResultsGallery({ data, themeColor }: ResultsGalleryProps) {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {data.results.map((result) => (
           <ResultCard
-            key={`${result.rank}-${result.isicId}`}
+            key={`${result.rank}-${result.imageId}`}
             result={result}
             themeColor={themeColor}
             onSelect={({ result: cardResult, imageUrl }) => setModal({ result: cardResult, imageUrl })}

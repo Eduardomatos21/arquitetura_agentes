@@ -47,7 +47,10 @@ MUSK_STATUS = "✅ MUSK disponível"
 # CONFIGURAÇÕES DO MODELO
 # ======================================
 TOP_K = 5
-VECTORSTORE_DIR = "./streamlit_chroma_vectorstore_precomputed"
+DEFAULT_VECTORSTORE_DIR = "./streamlit_chroma_vectorstore_precomputed"
+VECTORSTORE_DIR = os.environ.get("TCGA_VECTORSTORE_DIR", DEFAULT_VECTORSTORE_DIR)
+DEFAULT_VECTORSTORE_COLLECTION = "tcga_images_precomputed"
+VECTORSTORE_COLLECTION = os.environ.get("VECTORSTORE_COLLECTION", DEFAULT_VECTORSTORE_COLLECTION)
 cuda_device = os.environ.get("NVIDIA_VISIBLE_DEVICES", "0")
 DEVICE = torch.device(f"cuda:{cuda_device}" if torch.cuda.is_available() and cuda_device.isdigit() else "cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -146,6 +149,62 @@ def _prepare_filters(sex: Optional[str], min_age: Optional[Any], max_age: Option
 MetadataResult = Tuple[str, float, dict]
 
 
+def _derive_basename_and_ext(doc_path: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Retorna o nome-base e extensão (sem ponto) a partir de um caminho."""
+    if not doc_path:
+        return None, None
+
+    normalized = str(doc_path).replace("\\", "/")
+    basename = normalized.rsplit("/", 1)[-1]
+    if not basename:
+        return None, None
+
+    if "." in basename:
+        stem, ext = basename.rsplit(".", 1)
+        return stem or basename, ext.lower()
+    return basename, None
+
+
+def _resolve_media_info(
+    metadata: Optional[dict],
+    doc_path: Optional[str],
+) -> Tuple[Optional[str], Optional[str], str, Optional[str], Optional[str]]:
+    """Determina slug de imagem, extensão, rótulo de exibição e códigos auxiliares."""
+    safe_metadata = metadata if isinstance(metadata, dict) else {}
+
+    candidate_paths = [
+        safe_metadata.get("resolved_image_path"),
+        safe_metadata.get("image_path"),
+        safe_metadata.get("image_filename"),
+        doc_path,
+    ]
+
+    image_slug: Optional[str] = None
+    image_ext: Optional[str] = None
+    for candidate in candidate_paths:
+        stem, ext = _derive_basename_and_ext(candidate)
+        if stem:
+            image_slug, image_ext = stem, ext
+            break
+
+    display_candidates = [
+        safe_metadata.get("image_case_code"),
+        safe_metadata.get("image_slide_code"),
+        safe_metadata.get("case_id"),
+        image_slug,
+        doc_path,
+    ]
+    display_label = next(
+        (str(value).strip() for value in display_candidates if value),
+        image_slug or "resultado",
+    )
+
+    document_path = safe_metadata.get("resolved_image_path") or doc_path
+    case_code = safe_metadata.get("image_case_code")
+    slide_code = safe_metadata.get("image_slide_code")
+    return image_slug, image_ext, display_label, case_code, slide_code
+
+
 def _metadata_matches_filters(
     metadata: Optional[dict],
     sex: Optional[str],
@@ -224,12 +283,17 @@ def _summarize_filters(sex: Optional[str], min_age: Optional[int], max_age: Opti
 def _build_structured_entry(
     rank: int,
     similarity_percent: float,
-    doc_label: str,
-    doc_path: str,
+    image_slug: Optional[str],
+    display_label: str,
+    doc_path: Optional[str],
     metadata: Optional[dict],
     matches_filters: bool,
     patient_sex: Optional[str] = None,
     patient_age: Optional[Any] = None,
+    image_ext: Optional[str] = None,
+    case_code: Optional[str] = None,
+    slide_code: Optional[str] = None,
+    resolved_path: Optional[str] = None,
 ) -> dict:
     """Gera um dicionário serializável com informações essenciais do resultado."""
     safe_metadata = metadata if isinstance(metadata, dict) else {}
@@ -238,12 +302,19 @@ def _build_structured_entry(
     diagnosis_tertiary = safe_metadata.get("diagnosis_3")
     anatom_general = safe_metadata.get("anatom_site_general")
     anatom_special = safe_metadata.get("anatom_site_special")
+    resolved_doc_path = resolved_path or safe_metadata.get("resolved_image_path") or doc_path
+    case_code = case_code or safe_metadata.get("image_case_code")
+    slide_code = slide_code or safe_metadata.get("image_slide_code")
 
     return {
         "rank": rank,
         "similarity": round(similarity_percent, 2),
-        "isicId": doc_label,
-        "documentPath": doc_path,
+        "imageId": image_slug or _derive_basename_and_ext(resolved_doc_path)[0] or display_label,
+        "displayLabel": display_label,
+        "documentPath": resolved_doc_path,
+        "imageExt": image_ext,
+        "caseCode": case_code,
+        "slideCode": slide_code,
         "sex": patient_sex or safe_metadata.get("sex"),
         "ageApprox": patient_age or safe_metadata.get("age_approx") or safe_metadata.get("age"),
         "diagnosisPrimary": diagnosis_primary,
@@ -333,9 +404,9 @@ def load_vectorstore():
         _VECTORSTORE = Chroma(
             persist_directory=VECTORSTORE_DIR,
             embedding_function=embeddings,
-            collection_name="isic_images_precomputed"
+            collection_name=VECTORSTORE_COLLECTION,
         )
-        logger.info("Vectorstore loaded successfully with collection 'isic_images_precomputed'")
+        logger.info("Vectorstore loaded successfully with collection '%s'", VECTORSTORE_COLLECTION)
         return _VECTORSTORE
     except Exception as e:
         logger.exception("Failed to load vectorstore: %s", e)
@@ -433,7 +504,7 @@ def search_by_image_query(
     
     Examples:
         >>> search_by_image_query(top_k=3)
-        "Resultado #1: 85.23% de similaridade - ISIC_0053494.jpg\n..."
+        "Resultado #1: 85.23% de similaridade - TCGA-D7-A4YV-01Z-00-DX1\n..."
     """
     # Recuperar imagem diretamente do contexto
     image_bytes = None
@@ -616,8 +687,9 @@ def search_by_image_query(
 
         for i, (doc_path, distance, metadata) in enumerate(candidates, start=1):
             similarity_percent = max(0, (1 - distance / 2) * 100)
-            doc_label = metadata.get("isic_id") if isinstance(metadata, dict) else None
-            display = doc_label or doc_path
+            image_slug, image_ext, display, case_code, slide_code = _resolve_media_info(metadata, doc_path)
+            resolved_path = metadata.get("resolved_image_path") if isinstance(metadata, dict) else None
+            display_str = str(display or image_slug or doc_path or f"resultado_{i:02d}")
             patient_sex = metadata.get("sex") if isinstance(metadata, dict) else None
             patient_age = metadata.get("age_approx") if isinstance(metadata, dict) else None
             if patient_age is None and isinstance(metadata, dict):
@@ -638,7 +710,7 @@ def search_by_image_query(
                 extra_bits.append("⚠️ fora dos filtros")
             extras = f" ({', '.join(extra_bits)})" if extra_bits else ""
             result_line = (
-                f"  #{i:02d} | {similarity_percent:.2f}% de similaridade | {display}{extras}"
+                f"  #{i:02d} | {similarity_percent:.2f}% de similaridade | {display_str}{extras}"
             )
             result_lines.append(result_line)
             logger.info(
@@ -646,18 +718,23 @@ def search_by_image_query(
                 i,
                 distance,
                 similarity_percent,
-                display,
+                display_str,
             )
             structured_results.append(
                 _build_structured_entry(
                     rank=i,
                     similarity_percent=similarity_percent,
-                    doc_label=display,
+                    image_slug=image_slug,
+                    display_label=display_str,
                     doc_path=doc_path,
                     metadata=metadata if isinstance(metadata, dict) else {},
                     matches_filters=matches_filters,
                     patient_sex=patient_sex,
                     patient_age=patient_age,
+                    image_ext=image_ext,
+                    case_code=case_code,
+                    slide_code=slide_code,
+                    resolved_path=resolved_path,
                 )
             )
         result_lines.append("—" * 60)
@@ -717,8 +794,8 @@ def search_by_text_query(
         - Identificador ou descrição da imagem encontrada
         
     Example:
-        >>> search_by_text_query("prostate adenocarcinoma with cribriform pattern", top_k=3)
-        "Resultado #1: 92.15% de similaridade - ISIC_0053494.jpg\n..."
+    >>> search_by_text_query("gastric adenocarcinoma with diffuse pattern", top_k=3)
+    "Resultado #1: 92.15% de similaridade - TCGA-D7-A4YV-01Z-00-DX1\n..."
     """
     sex, min_age, max_age = _prepare_filters(sex, min_age, max_age)
     filters_applied = any(v is not None for v in (sex, min_age, max_age))
@@ -855,8 +932,9 @@ def search_by_text_query(
 
         for i, (doc_path, distance, metadata) in enumerate(candidates, start=1):
             similarity_percent = max(0, (1 - distance / 2) * 100)
-            doc_label = metadata.get("isic_id") if isinstance(metadata, dict) else None
-            display = doc_label or doc_path
+            image_slug, image_ext, display, case_code, slide_code = _resolve_media_info(metadata, doc_path)
+            resolved_path = metadata.get("resolved_image_path") if isinstance(metadata, dict) else None
+            display_str = str(display or image_slug or doc_path or f"resultado_{i:02d}")
             patient_sex = metadata.get("sex") if isinstance(metadata, dict) else None
             patient_age = metadata.get("age_approx") if isinstance(metadata, dict) else None
             if patient_age is None and isinstance(metadata, dict):
@@ -877,7 +955,7 @@ def search_by_text_query(
                 extra_bits.append("⚠️ fora dos filtros")
             extras = f" ({', '.join(extra_bits)})" if extra_bits else ""
             result_line = (
-                f"  #{i:02d} | {similarity_percent:.2f}% de similaridade | {display}{extras}"
+                f"  #{i:02d} | {similarity_percent:.2f}% de similaridade | {display_str}{extras}"
             )
             result_lines.append(result_line)
             logger.info(
@@ -885,18 +963,23 @@ def search_by_text_query(
                 i,
                 distance,
                 similarity_percent,
-                display,
+                display_str,
             )
             structured_results.append(
                 _build_structured_entry(
                     rank=i,
                     similarity_percent=similarity_percent,
-                    doc_label=display,
+                    image_slug=image_slug,
+                    display_label=display_str,
                     doc_path=doc_path,
                     metadata=metadata if isinstance(metadata, dict) else {},
                     matches_filters=matches_filters,
                     patient_sex=patient_sex,
                     patient_age=patient_age,
+                    image_ext=image_ext,
+                    case_code=case_code,
+                    slide_code=slide_code,
+                    resolved_path=resolved_path,
                 )
             )
         result_lines.append("—" * 60)

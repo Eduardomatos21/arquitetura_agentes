@@ -2,7 +2,19 @@ import { promises as fs } from "fs";
 import { NextRequest } from "next/server";
 import path from "path";
 
-const IMAGE_DIR = path.join(process.cwd(), "assets", "ISIC-images");
+const DEFAULT_DATASET_PATH = path.join("assets", "STAD_TRAIN_MSIMUT", "MSIMUT");
+
+function resolveImageDir(): string {
+  const configured = process.env.TCGA_IMAGE_DIR;
+  if (configured && configured.trim().length > 0) {
+    return path.isAbsolute(configured)
+      ? configured
+      : path.join(process.cwd(), configured);
+  }
+  return path.join(process.cwd(), DEFAULT_DATASET_PATH);
+}
+
+const IMAGE_DIR = resolveImageDir();
 const ALLOWED_EXTENSIONS = ["jpg", "jpeg", "png", "webp"];
 
 function sanitizeImageId(imageId: string): string | null {
@@ -17,9 +29,10 @@ function getContentType(ext: string): string {
 
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { imageId: string } }
+  { params }: { params: Promise<{ imageId: string }> }
 ): Promise<Response> {
-  const safeId = sanitizeImageId(params.imageId);
+  const { imageId } = await params;
+  const safeId = sanitizeImageId(imageId);
 
   if (!safeId) {
     return new Response("Invalid image id", { status: 400 });
