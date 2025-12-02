@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import time
+import ast
 from io import BytesIO
 from urllib.parse import urlparse
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -280,6 +281,139 @@ def _summarize_filters(sex: Optional[str], min_age: Optional[int], max_age: Opti
     return ", ".join(parts) if parts else None
 
 
+_METADATA_EMPTY_VALUES = {
+    "",
+    "not reported",
+    "not applicable",
+    "unknown",
+    "pending",
+    "na",
+    "n/a",
+    "nan",
+    "none",
+    "unspecified",
+}
+
+
+def _parse_sequence_literal(value: str) -> List[str]:
+    """Tenta extrair lista de uma representação textual simples."""
+    stripped = value.strip()
+    if not stripped:
+        return []
+    try:
+        parsed = ast.literal_eval(stripped)
+    except (ValueError, SyntaxError):
+        parsed = None
+    items: List[str] = []
+    if isinstance(parsed, (list, tuple, set)):
+        for item in parsed:
+            text = str(item).strip()
+            if text:
+                items.append(text)
+        return items
+    if stripped.startswith("[") and stripped.endswith("]"):
+        inner = stripped[1:-1]
+        for chunk in inner.split(","):
+            text = chunk.strip(" '\"")
+            if text:
+                items.append(text)
+        return items
+    if ";" in stripped:
+        for chunk in stripped.split(";"):
+            text = chunk.strip()
+            if text:
+                items.append(text)
+        return items
+    if "," in stripped:
+        for chunk in stripped.split(","):
+            text = chunk.strip()
+            if text:
+                items.append(text)
+        return items
+    return [stripped]
+
+
+def _clean_metadata_value(value: Optional[Any], *, allow_list: bool = False) -> Optional[Any]:
+    """Normaliza valores de metadados removendo placeholders e espaços extra."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                return None
+        except TypeError:
+            return None
+        return int(value) if isinstance(value, float) and value.is_integer() else value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        lowered = stripped.lower()
+        if lowered in _METADATA_EMPTY_VALUES:
+            return None
+        if allow_list:
+            items = _parse_sequence_literal(stripped)
+            unique_items = []
+            for item in items:
+                lowered_item = item.lower()
+                if lowered_item in _METADATA_EMPTY_VALUES:
+                    continue
+                if item not in unique_items:
+                    unique_items.append(item)
+            return unique_items or None
+        return stripped
+    if isinstance(value, (list, tuple, set)):
+        items: List[str] = []
+        for item in value:
+            normalized = _clean_metadata_value(item)
+            if normalized is None:
+                continue
+            if isinstance(normalized, (int, float)):
+                items.append(str(int(normalized)) if isinstance(normalized, float) and normalized.is_integer() else str(normalized))
+            else:
+                items.append(str(normalized))
+        if not items:
+            return None
+        if allow_list:
+            unique_items: List[str] = []
+            for item in items:
+                if item not in unique_items:
+                    unique_items.append(item)
+            return unique_items
+        return items[0]
+    text = str(value).strip()
+    if not text:
+        return None
+    if allow_list:
+        return _parse_sequence_literal(text)
+    return text
+
+
+def _coerce_float(value: Optional[Any]) -> Optional[float]:
+    """Converte valor arbitrário em float, se possível."""
+    cleaned = _clean_metadata_value(value)
+    if cleaned is None:
+        return None
+    if isinstance(cleaned, bool):
+        return None
+    if isinstance(cleaned, (int, float)):
+        number = float(cleaned)
+        if math.isnan(number) or math.isinf(number):
+            return None
+        return number
+    if isinstance(cleaned, str):
+        try:
+            number = float(cleaned)
+        except ValueError:
+            return None
+        if math.isnan(number) or math.isinf(number):
+            return None
+        return number
+    return None
+
+
 def _build_structured_entry(
     rank: int,
     similarity_percent: float,
@@ -297,14 +431,104 @@ def _build_structured_entry(
 ) -> dict:
     """Gera um dicionário serializável com informações essenciais do resultado."""
     safe_metadata = metadata if isinstance(metadata, dict) else {}
-    diagnosis_primary = safe_metadata.get("diagnosis_1")
-    diagnosis_secondary = safe_metadata.get("diagnosis_2")
-    diagnosis_tertiary = safe_metadata.get("diagnosis_3")
-    anatom_general = safe_metadata.get("anatom_site_general")
-    anatom_special = safe_metadata.get("anatom_site_special")
+    def pick_value(keys: Iterable[str]) -> Optional[str]:
+        for key in keys:
+            if key not in safe_metadata:
+                continue
+            candidate = _clean_metadata_value(safe_metadata.get(key))
+            if candidate is None:
+                continue
+            if isinstance(candidate, (int, float)):
+                return str(int(candidate)) if isinstance(candidate, float) and candidate.is_integer() else str(candidate)
+            if isinstance(candidate, str):
+                return candidate
+        return None
+
+    def pick_list(keys: Iterable[str]) -> Optional[List[str]]:
+        for key in keys:
+            if key not in safe_metadata:
+                continue
+            candidate = _clean_metadata_value(safe_metadata.get(key), allow_list=True)
+            if candidate:
+                return list(candidate)
+        return None
+
+    def pick_number(keys: Iterable[str]) -> Optional[float]:
+        for key in keys:
+            if key not in safe_metadata:
+                continue
+            number = _coerce_float(safe_metadata.get(key))
+            if number is not None:
+                return number
+        return None
+
+    diagnosis_primary = pick_value(("primary_diagnosis.diagnoses", "diagnosis_1"))
+    diagnosis_secondary = pick_value(("diagnosis_2",))
+    diagnosis_tertiary = pick_value(("diagnosis_3",))
+    anatom_general = pick_value((
+        "anatom_site_general",
+        "tissue_or_organ_of_origin.diagnoses",
+        "primary_site.project",
+        "primary_site",
+    ))
+    anatom_special = pick_value((
+        "anatom_site_special",
+        "site_of_resection_or_biopsy.diagnoses",
+    ))
+    pathologic_stage = pick_value(("ajcc_pathologic_stage.diagnoses",))
+    ajcc_pathologic_t = pick_value(("ajcc_pathologic_t.diagnoses",))
+    ajcc_pathologic_n = pick_value(("ajcc_pathologic_n.diagnoses",))
+    ajcc_pathologic_m = pick_value(("ajcc_pathologic_m.diagnoses",))
+    tissue_origin = pick_value(("tissue_or_organ_of_origin.diagnoses",))
+    site_resection = pick_value(("site_of_resection_or_biopsy.diagnoses",))
+    morphology = pick_value(("morphology.diagnoses",))
+    tumor_grade = pick_value(("tumor_grade.diagnoses",))
+    classification_of_tumor = pick_value(("classification_of_tumor.diagnoses",))
+    last_known_status = pick_value(("last_known_disease_status.diagnoses",))
+    primary_site = pick_value(("primary_site.project", "primary_site"))
+    disease_type_list = pick_list(("disease_type.project",))
+    disease_type = ", ".join(disease_type_list) if disease_type_list else pick_value(("disease_type",))
+    vital_status = pick_value(("vital_status.demographic",))
+    race = pick_value(("race.demographic",))
+    ethnicity = pick_value(("ethnicity.demographic",))
+    tissue_type = pick_value(("tissue_type.samples",))
+    specimen_type = pick_value(("specimen_type.samples",))
+    treatment_types = pick_list(("treatment_type.treatments.diagnoses",))
+    age_at_index_years = pick_number(("age_at_index.demographic",))
+    age_at_diagnosis_years = pick_number((
+        "age_at_earliest_diagnosis_in_years.diagnoses.xena_derived",
+        "age_at_diagnosis.diagnoses",
+    ))
+    days_to_last_follow_up = pick_number(("days_to_last_follow_up.diagnoses",))
+    days_to_death = pick_number(("days_to_death.demographic",))
     resolved_doc_path = resolved_path or safe_metadata.get("resolved_image_path") or doc_path
     case_code = case_code or safe_metadata.get("image_case_code")
     slide_code = slide_code or safe_metadata.get("image_slide_code")
+    if not patient_sex:
+        fallback_sex = pick_value(("sex", "gender.demographic"))
+        if fallback_sex:
+            normalized = fallback_sex.strip().lower()
+            patient_sex = normalized if normalized in {"male", "female"} else fallback_sex.strip()
+    if patient_age is None:
+        fallback_age = age_at_index_years or age_at_diagnosis_years
+        if fallback_age is not None:
+            patient_age = int(round(fallback_age))
+    if patient_age is None:
+        direct_age = _coerce_float(safe_metadata.get("age_approx") or safe_metadata.get("age"))
+        if direct_age is not None:
+            patient_age = int(round(direct_age))
+
+    def normalize_numeric_display(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        rounded = round(value, 1)
+        if abs(rounded - round(rounded)) < 0.05:
+            return int(round(rounded))
+        return rounded
+
+    age_at_diagnosis_display = normalize_numeric_display(age_at_diagnosis_years)
+    days_to_last_follow_up_display = normalize_numeric_display(days_to_last_follow_up)
+    days_to_death_display = normalize_numeric_display(days_to_death)
 
     return {
         "rank": rank,
@@ -317,11 +541,32 @@ def _build_structured_entry(
         "slideCode": slide_code,
         "sex": patient_sex or safe_metadata.get("sex"),
         "ageApprox": patient_age or safe_metadata.get("age_approx") or safe_metadata.get("age"),
+        "ageAtDiagnosis": age_at_diagnosis_display,
         "diagnosisPrimary": diagnosis_primary,
         "diagnosisSecondary": diagnosis_secondary,
         "diagnosisTertiary": diagnosis_tertiary,
         "anatomSiteGeneral": anatom_general,
         "anatomSiteSpecial": anatom_special,
+        "pathologicStage": pathologic_stage,
+        "ajccPathologicT": ajcc_pathologic_t,
+        "ajccPathologicN": ajcc_pathologic_n,
+        "ajccPathologicM": ajcc_pathologic_m,
+        "tissueOrOrganOfOrigin": tissue_origin,
+        "siteOfResectionOrBiopsy": site_resection,
+        "morphology": morphology,
+        "tumorGrade": tumor_grade,
+        "classificationOfTumor": classification_of_tumor,
+        "lastKnownDiseaseStatus": last_known_status,
+        "primarySite": primary_site,
+        "diseaseType": disease_type,
+        "vitalStatus": vital_status,
+        "race": race,
+        "ethnicity": ethnicity,
+        "tissueType": tissue_type,
+        "specimenType": specimen_type,
+        "treatmentTypes": treatment_types,
+        "daysToLastFollowUp": days_to_last_follow_up_display,
+        "daysToDeath": days_to_death_display,
         "matchedFilters": matches_filters,
     }
 

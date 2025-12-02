@@ -13,11 +13,32 @@ export type SearchResultItem = {
   documentPath?: string;
   sex?: string | null;
   ageApprox?: number | string | null;
+  ageAtDiagnosis?: number | string | null;
   diagnosisPrimary?: string | null;
   diagnosisSecondary?: string | null;
   diagnosisTertiary?: string | null;
   anatomSiteGeneral?: string | null;
   anatomSiteSpecial?: string | null;
+  pathologicStage?: string | null;
+  ajccPathologicT?: string | null;
+  ajccPathologicN?: string | null;
+  ajccPathologicM?: string | null;
+  tissueOrOrganOfOrigin?: string | null;
+  siteOfResectionOrBiopsy?: string | null;
+  morphology?: string | null;
+  tumorGrade?: string | null;
+  classificationOfTumor?: string | null;
+  lastKnownDiseaseStatus?: string | null;
+  primarySite?: string | null;
+  diseaseType?: string | null;
+  vitalStatus?: string | null;
+  race?: string | null;
+  ethnicity?: string | null;
+  tissueType?: string | null;
+  specimenType?: string | null;
+  treatmentTypes?: string[] | null;
+  daysToLastFollowUp?: number | string | null;
+  daysToDeath?: number | string | null;
   matchedFilters?: boolean;
 };
 
@@ -86,6 +107,88 @@ function formatSimilarity(value: number): string {
   return `${value.toFixed(2)}%`;
 }
 
+function formatSex(value?: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === 'male') {
+    return 'Masculino';
+  }
+  if (normalized === 'female') {
+    return 'Feminino';
+  }
+  return value.trim();
+}
+
+function formatAge(value?: number | string | null): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const numeric = typeof value === 'string' ? Number(value) : value;
+  if (Number.isNaN(numeric) || !Number.isFinite(numeric)) {
+    return null;
+  }
+  const rounded = Math.round(numeric * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}` : `${rounded.toFixed(1)}`;
+}
+
+function toTitleCase(value?: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed
+    .split(/\s+/)
+    .map((word) => {
+      if (!word) {
+        return word;
+      }
+      const isAllCaps = word === word.toUpperCase();
+      if (isAllCaps) {
+        return word;
+      }
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(' ');
+}
+
+function sanitizeList(values?: string[] | null): string[] {
+  if (!values) {
+    return [];
+  }
+  const emptyTokens = new Set(['not reported', 'not applicable', 'unknown', 'none', 'na', 'n/a']);
+  const seen = new Set<string>();
+  return values
+    .map((item) => item?.trim())
+    .filter((item): item is string => Boolean(item))
+    .filter((item) => !emptyTokens.has(item.toLowerCase()))
+    .filter((item) => {
+      if (seen.has(item)) {
+        return false;
+      }
+      seen.add(item);
+      return true;
+    });
+}
+
+function formatDays(value?: number | string | null): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const numeric = typeof value === 'string' ? Number(value) : value;
+  if (Number.isNaN(numeric) || !Number.isFinite(numeric)) {
+    return null;
+  }
+  return `${Math.round(numeric)}`;
+}
+
 function ResultCard({
   result,
   themeColor,
@@ -104,6 +207,16 @@ function ResultCard({
   const anatomy = result.anatomSiteSpecial || result.anatomSiteGeneral;
   const cardAccent = `${themeColor}33`;
   const identifier = result.caseCode || result.displayLabel || result.imageId;
+  const formattedSex = formatSex(result.sex);
+  const ageValue = result.ageApprox ?? result.ageAtDiagnosis;
+  const ageDisplay = formatAge(ageValue);
+  const stageDisplay = result.pathologicStage;
+  const primarySiteDisplay =
+    toTitleCase(result.primarySite) ??
+    toTitleCase(result.tissueOrOrganOfOrigin) ??
+    result.primarySite ??
+    result.tissueOrOrganOfOrigin ??
+    null;
   const secondaryIdentifier = (() => {
     if (result.caseCode && result.displayLabel && result.displayLabel !== result.caseCode) {
       return result.displayLabel;
@@ -153,14 +266,20 @@ function ResultCard({
           {result.slideCode && (
             <span className="rounded-full bg-white/10 px-2 py-1">{`Slide: ${result.slideCode}`}</span>
           )}
-          {result.sex && (
-            <span className="rounded-full bg-white/10 px-2 py-1">{`Sexo: ${result.sex}`}</span>
+          {formattedSex && (
+            <span className="rounded-full bg-white/10 px-2 py-1">{`Sexo: ${formattedSex}`}</span>
           )}
-          {result.ageApprox && (
-            <span className="rounded-full bg-white/10 px-2 py-1">{`Idade≈ ${result.ageApprox}`}</span>
+          {ageDisplay && (
+            <span className="rounded-full bg-white/10 px-2 py-1">{`Idade≈ ${ageDisplay}`}</span>
           )}
           {anatomy && (
             <span className="rounded-full bg-white/10 px-2 py-1">{anatomy}</span>
+          )}
+          {stageDisplay && (
+            <span className="rounded-full bg-white/10 px-2 py-1">{`Estágio: ${stageDisplay}`}</span>
+          )}
+          {primarySiteDisplay && (
+            <span className="rounded-full bg-white/10 px-2 py-1">{primarySiteDisplay}</span>
           )}
           {result.matchedFilters === false && (
             <span className="rounded-full bg-amber-500/70 px-2 py-1 text-slate-900">Fora dos filtros</span>
@@ -243,6 +362,41 @@ function ImagePreviewModal({
     }
     return null;
   })();
+  const formattedSex = formatSex(result.sex);
+  const ageApproxDisplay = formatAge(result.ageApprox);
+  const ageAtDiagnosisDisplay = formatAge(result.ageAtDiagnosis);
+  const raceDisplay = toTitleCase(result.race) ?? result.race ?? null;
+  const ethnicityDisplay = toTitleCase(result.ethnicity) ?? result.ethnicity ?? null;
+  const vitalStatusDisplay = toTitleCase(result.vitalStatus) ?? result.vitalStatus ?? null;
+  const primarySiteDisplay =
+    toTitleCase(result.primarySite) ??
+    toTitleCase(result.tissueOrOrganOfOrigin) ??
+    result.primarySite ??
+    result.tissueOrOrganOfOrigin ??
+    null;
+  const tissueOriginDisplay = toTitleCase(result.tissueOrOrganOfOrigin) ?? result.tissueOrOrganOfOrigin ?? null;
+  const siteResectionDisplay = toTitleCase(result.siteOfResectionOrBiopsy) ?? result.siteOfResectionOrBiopsy ?? null;
+  const diseaseTypeDisplay = toTitleCase(result.diseaseType) ?? result.diseaseType ?? null;
+  const tissueTypeDisplay = toTitleCase(result.tissueType) ?? result.tissueType ?? null;
+  const specimenTypeDisplay = toTitleCase(result.specimenType) ?? result.specimenType ?? null;
+  const tumorGradeDisplay = toTitleCase(result.tumorGrade) ?? result.tumorGrade ?? null;
+  const classificationDisplay = toTitleCase(result.classificationOfTumor) ?? result.classificationOfTumor ?? null;
+  const lastKnownStatusDisplay = toTitleCase(result.lastKnownDiseaseStatus) ?? result.lastKnownDiseaseStatus ?? null;
+  const morphologyDisplay = result.morphology ?? null;
+  const daysToLastFollowUpDisplay = formatDays(result.daysToLastFollowUp);
+  const daysToDeathDisplay = formatDays(result.daysToDeath);
+  const treatmentTypes = sanitizeList(result.treatmentTypes);
+
+  const toDisplay = (value: string | number | null | undefined) => {
+    if (value === null || value === undefined) {
+      return '—';
+    }
+    if (typeof value === 'number') {
+      return Number.isInteger(value) ? `${value}` : value.toFixed(1);
+    }
+    const trimmed = value.trim();
+    return trimmed ? trimmed : '—';
+  };
 
   return (
     <div
@@ -287,23 +441,58 @@ function ImagePreviewModal({
               )}
             </div>
             <div className="rounded-2xl bg-white/10 p-4 text-sm sm:p-5">
-              <h3 className="text-sm font-semibold uppercase tracking-wide text-white/70">Detalhes do paciente</h3>
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-white/70">Dados demográficos</h3>
               <ul className="mt-2 space-y-1 text-white/80">
-                <li>Código do caso: {result.caseCode ?? '—'}</li>
-                <li>Código do slide: {result.slideCode ?? '—'}</li>
-                <li>Sexo: {result.sex ?? '—'}</li>
-                <li>Idade aproximada: {result.ageApprox ?? '—'}</li>
-                <li>Local anatômico: {anatomy ?? '—'}</li>
+                <li>Código do caso: {toDisplay(result.caseCode)}</li>
+                <li>Código do slide: {toDisplay(result.slideCode)}</li>
+                <li>Sexo: {toDisplay(formattedSex)}</li>
+                <li>Idade aproximada: {toDisplay(ageApproxDisplay)}</li>
+                <li>Idade no diagnóstico (anos): {toDisplay(ageAtDiagnosisDisplay)}</li>
+                <li>Raça: {toDisplay(raceDisplay)}</li>
+                <li>Etnia: {toDisplay(ethnicityDisplay)}</li>
+                <li>Status vital: {toDisplay(vitalStatusDisplay)}</li>
               </ul>
             </div>
             <div className="rounded-2xl bg-white/10 p-4 text-sm sm:p-5">
-              <h3 className="text-sm font-semibold uppercase tracking-wide text-white/70">Diagnóstico</h3>
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-white/70">Diagnóstico e estadiamento</h3>
               <ul className="mt-2 space-y-1 text-white/80">
-                <li>Principal: {diagnosis ?? '—'}</li>
-                <li>Secundário: {result.diagnosisSecondary ?? '—'}</li>
-                <li>Terciário: {result.diagnosisTertiary ?? '—'}</li>
+                <li>Diagnóstico principal: {toDisplay(diagnosis)}</li>
+                <li>Diagnóstico secundário: {toDisplay(result.diagnosisSecondary)}</li>
+                <li>Diagnóstico terciário: {toDisplay(result.diagnosisTertiary)}</li>
+                <li>Estágio patológico: {toDisplay(result.pathologicStage)}</li>
+                <li>AJCC T: {toDisplay(result.ajccPathologicT)}</li>
+                <li>AJCC N: {toDisplay(result.ajccPathologicN)}</li>
+                <li>AJCC M: {toDisplay(result.ajccPathologicM)}</li>
+                <li>Grau tumoral: {toDisplay(tumorGradeDisplay)}</li>
+                <li>Classificação do tumor: {toDisplay(classificationDisplay)}</li>
+                <li>Status da doença: {toDisplay(lastKnownStatusDisplay)}</li>
+                <li>Morfologia: {toDisplay(morphologyDisplay)}</li>
+                <li>Dias até último acompanhamento: {toDisplay(daysToLastFollowUpDisplay)}</li>
+                <li>Dias até óbito: {toDisplay(daysToDeathDisplay)}</li>
               </ul>
             </div>
+            <div className="rounded-2xl bg-white/10 p-4 text-sm sm:p-5">
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-white/70">Amostra e origem</h3>
+              <ul className="mt-2 space-y-1 text-white/80">
+                <li>Local primário: {toDisplay(primarySiteDisplay)}</li>
+                <li>Tecido/órgão de origem: {toDisplay(tissueOriginDisplay)}</li>
+                <li>Sítio de ressecção/biópsia: {toDisplay(siteResectionDisplay)}</li>
+                <li>Tipo de tecido: {toDisplay(tissueTypeDisplay)}</li>
+                <li>Tipo de amostra: {toDisplay(specimenTypeDisplay)}</li>
+                <li>Tipo de doença: {toDisplay(diseaseTypeDisplay)}</li>
+                <li>Local anatômico reportado: {toDisplay(anatomy)}</li>
+              </ul>
+            </div>
+            {treatmentTypes.length > 0 && (
+              <div className="rounded-2xl bg-white/10 p-4 text-sm sm:p-5">
+                <h3 className="text-sm font-semibold uppercase tracking-wide text-white/70">Tratamentos registrados</h3>
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-white/80">
+                  {treatmentTypes.map((item) => (
+                    <li key={item}>{toDisplay(toTitleCase(item) ?? item)}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
           <div className="flex flex-col gap-4 md:gap-5">
             <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-slate-900" style={{ aspectRatio: '4 / 3' }}>
