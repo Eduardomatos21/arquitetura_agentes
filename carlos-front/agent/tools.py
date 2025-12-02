@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import math
+import time
 from io import BytesIO
 from urllib.parse import urlparse
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -119,6 +120,26 @@ def _prepare_filters(sex: Optional[str], min_age: Optional[Any], max_age: Option
         )
         normalized_min_age, normalized_max_age = normalized_max_age, normalized_min_age
 
+    margin = 3
+    if normalized_min_age is not None:
+        normalized_min_age = max(normalized_min_age - margin, 0)
+    if normalized_max_age is not None:
+        normalized_max_age = normalized_max_age + margin
+
+    if (
+        normalized_min_age is not None
+        and normalized_max_age is not None
+        and normalized_min_age > normalized_max_age
+    ):
+        logger.info(
+            "Adjusted margin caused min to exceed max; collapsing to single value (min=%s max=%s)",
+            normalized_min_age,
+            normalized_max_age,
+        )
+        midpoint = normalized_min_age
+        normalized_min_age = midpoint
+        normalized_max_age = midpoint
+
     return normalized_sex, normalized_min_age, normalized_max_age
 
 
@@ -198,6 +219,54 @@ def _summarize_filters(sex: Optional[str], min_age: Optional[int], max_age: Opti
     elif max_age is not None:
         parts.append(f"idade máxima: {max_age} anos")
     return ", ".join(parts) if parts else None
+
+
+def _build_structured_entry(
+    rank: int,
+    similarity_percent: float,
+    doc_label: str,
+    doc_path: str,
+    metadata: Optional[dict],
+    matches_filters: bool,
+    patient_sex: Optional[str] = None,
+    patient_age: Optional[Any] = None,
+) -> dict:
+    """Gera um dicionário serializável com informações essenciais do resultado."""
+    safe_metadata = metadata if isinstance(metadata, dict) else {}
+    diagnosis_primary = safe_metadata.get("diagnosis_1")
+    diagnosis_secondary = safe_metadata.get("diagnosis_2")
+    diagnosis_tertiary = safe_metadata.get("diagnosis_3")
+    anatom_general = safe_metadata.get("anatom_site_general")
+    anatom_special = safe_metadata.get("anatom_site_special")
+
+    return {
+        "rank": rank,
+        "similarity": round(similarity_percent, 2),
+        "isicId": doc_label,
+        "documentPath": doc_path,
+        "sex": patient_sex or safe_metadata.get("sex"),
+        "ageApprox": patient_age or safe_metadata.get("age_approx") or safe_metadata.get("age"),
+        "diagnosisPrimary": diagnosis_primary,
+        "diagnosisSecondary": diagnosis_secondary,
+        "diagnosisTertiary": diagnosis_tertiary,
+        "anatomSiteGeneral": anatom_general,
+        "anatomSiteSpecial": anatom_special,
+        "matchedFilters": matches_filters,
+    }
+
+
+def _push_results_to_state(tool_context: Optional[Any], payload: dict) -> None:
+    """Atualiza o estado compartilhado com os resultados estruturados."""
+    if not TOOL_CONTEXT_AVAILABLE or tool_context is None:
+        return
+
+    try:
+        state = getattr(tool_context, "state", None)
+        if state is None:
+            return
+        state["searchResults"] = payload
+    except Exception as exc:
+        logger.exception("Failed to push structured search results to state: %s", exc)
 
 # ======================================
 # EMBEDDINGS PLACEHOLDER (apenas para query)
@@ -489,16 +558,51 @@ def search_by_image_query(
         if not candidates:
             filter_msg = _summarize_filters(sex, min_age, max_age)
             if filter_msg:
-                return (
+                response = (
                     "⚠️ Nenhum resultado encontrado com os filtros aplicados. "
                     f"Filtros: {filter_msg}. Tente ajustar ou remover os filtros."
                 )
+                _push_results_to_state(
+                    tool_context,
+                    {
+                        "source": "image",
+                        "timestamp": int(time.time()),
+                        "filters": {
+                            "sex": sex,
+                            "minAge": min_age,
+                            "maxAge": max_age,
+                            "summary": filter_msg,
+                            "fallbackUsed": False,
+                        },
+                        "results": [],
+                        "rawText": response,
+                    },
+                )
+                return response
             logger.warning("No raw documents returned for image query")
-            return "⚠️ Nenhuma imagem semelhante foi encontrada." 
+            response = "⚠️ Nenhuma imagem semelhante foi encontrada."
+            _push_results_to_state(
+                tool_context,
+                {
+                    "source": "image",
+                    "timestamp": int(time.time()),
+                    "filters": {
+                        "sex": sex,
+                        "minAge": min_age,
+                        "maxAge": max_age,
+                        "summary": None,
+                        "fallbackUsed": False,
+                    },
+                    "results": [],
+                    "rawText": response,
+                },
+            )
+            return response
 
         # Formatar resultados como string legível
         result_lines = [f"\n📊 Resultados da busca por imagem (Imagem → Imagens semelhantes):"]
         filter_summary = _summarize_filters(sex, min_age, max_age)
+        fallback_flag = fallback_used
         if filter_summary:
             result_lines.append(f"  ↳ Filtros aplicados: {filter_summary}")
             if fallback_used:
@@ -507,6 +611,8 @@ def search_by_image_query(
                 )
         elif fallback_used:
             fallback_used = False  # Segurança; não deve ocorrer sem filtros.
+
+        structured_results: List[dict] = []
 
         for i, (doc_path, distance, metadata) in enumerate(candidates, start=1):
             similarity_percent = max(0, (1 - distance / 2) * 100)
@@ -542,8 +648,35 @@ def search_by_image_query(
                 similarity_percent,
                 display,
             )
+            structured_results.append(
+                _build_structured_entry(
+                    rank=i,
+                    similarity_percent=similarity_percent,
+                    doc_label=display,
+                    doc_path=doc_path,
+                    metadata=metadata if isinstance(metadata, dict) else {},
+                    matches_filters=matches_filters,
+                    patient_sex=patient_sex,
+                    patient_age=patient_age,
+                )
+            )
         result_lines.append("—" * 60)
         logger.info("Formatted image search response with %s entries", len(result_lines) - 2)
+
+        payload = {
+            "source": "image",
+            "timestamp": int(time.time()),
+            "filters": {
+                "sex": sex,
+                "minAge": min_age,
+                "maxAge": max_age,
+                "summary": filter_summary,
+                "fallbackUsed": fallback_flag,
+            },
+            "results": structured_results,
+            "rawText": "\n".join(result_lines),
+        }
+        _push_results_to_state(tool_context, payload)
 
         return "\n".join(result_lines)
     
@@ -558,6 +691,7 @@ def search_by_text_query(
     sex: Optional[str] = None,
     min_age: Optional[Any] = None,
     max_age: Optional[Any] = None,
+    tool_context = None,
 ) -> str:
     """Busca imagens de lâminas histológicas a partir de uma descrição textual.
     
@@ -622,7 +756,7 @@ def search_by_text_query(
         norm = math.sqrt(sum(x * x for x in query_embedding))
         logger.info("Text embedding length=%s l2_norm=%.4f", len(query_embedding), norm)
         try:
-            n_results = top_k if not filters_applied else 100
+            n_results = top_k if not filters_applied else 300
             raw = collection.query(
                 query_embeddings=[query_embedding],
                 n_results=n_results,
@@ -661,16 +795,53 @@ def search_by_text_query(
         if not candidates:
             filter_msg = _summarize_filters(sex, min_age, max_age)
             if filter_msg:
-                return (
+                response = (
                     "⚠️ Nenhum resultado encontrado com os filtros aplicados. "
                     f"Filtros: {filter_msg}. Tente ajustar ou remover os filtros."
                 )
+                _push_results_to_state(
+                    tool_context,
+                    {
+                        "source": "text",
+                        "timestamp": int(time.time()),
+                        "filters": {
+                            "sex": sex,
+                            "minAge": min_age,
+                            "maxAge": max_age,
+                            "summary": filter_msg,
+                            "fallbackUsed": False,
+                        },
+                        "results": [],
+                        "rawText": response,
+                        "query": text_query,
+                    },
+                )
+                return response
             logger.warning("No raw documents returned for text query")
-            return "⚠️ Nenhuma imagem correspondente foi encontrada." 
+            response = "⚠️ Nenhuma imagem correspondente foi encontrada."
+            _push_results_to_state(
+                tool_context,
+                {
+                    "source": "text",
+                    "timestamp": int(time.time()),
+                    "filters": {
+                        "sex": sex,
+                        "minAge": min_age,
+                        "maxAge": max_age,
+                        "summary": None,
+                        "fallbackUsed": False,
+                    },
+                    "results": [],
+                    "rawText": response,
+                    "query": text_query,
+                },
+            )
+            return response
 
         # Formatar resultados como string legível
         result_lines = [f"\n📊 Resultados da busca textual (Texto → Imagens correspondentes):"]
         filter_summary = _summarize_filters(sex, min_age, max_age)
+        fallback_flag = fallback_used
         if filter_summary:
             result_lines.append(f"  ↳ Filtros aplicados: {filter_summary}")
             if fallback_used:
@@ -679,6 +850,8 @@ def search_by_text_query(
                 )
         elif fallback_used:
             fallback_used = False
+
+        structured_results: List[dict] = []
 
         for i, (doc_path, distance, metadata) in enumerate(candidates, start=1):
             similarity_percent = max(0, (1 - distance / 2) * 100)
@@ -714,8 +887,36 @@ def search_by_text_query(
                 similarity_percent,
                 display,
             )
+            structured_results.append(
+                _build_structured_entry(
+                    rank=i,
+                    similarity_percent=similarity_percent,
+                    doc_label=display,
+                    doc_path=doc_path,
+                    metadata=metadata if isinstance(metadata, dict) else {},
+                    matches_filters=matches_filters,
+                    patient_sex=patient_sex,
+                    patient_age=patient_age,
+                )
+            )
         result_lines.append("—" * 60)
         logger.info("Formatted text search response with %s entries", len(result_lines) - 2)
+
+        payload = {
+            "source": "text",
+            "timestamp": int(time.time()),
+            "filters": {
+                "sex": sex,
+                "minAge": min_age,
+                "maxAge": max_age,
+                "summary": filter_summary,
+                "fallbackUsed": fallback_flag,
+            },
+            "results": structured_results,
+            "rawText": "\n".join(result_lines),
+            "query": text_query,
+        }
+        _push_results_to_state(tool_context, payload)
 
         return "\n".join(result_lines)
     
@@ -723,4 +924,3 @@ def search_by_text_query(
         logger.exception("Unhandled error during text search: %s", e)
         return f"❌ Erro ao processar consulta textual: {str(e)}"
     
-#TODO: Adicionar ferramenta de filtro por padrão morfológico
