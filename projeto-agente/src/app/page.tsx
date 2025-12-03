@@ -30,7 +30,7 @@ export default function CopilotKitPage() {
         imageUploadsEnabled={true}
         inputFileAccept="image/jpeg,image/png,image/webp"
         labels={{
-          title: "Popup Assistant",
+          title: "Assistente de Histopatologia",
           initial: "👋 Olá! Você está conversando com um agente especializado em histopatologia. Experimente:\n- **Busca por imagem**: envie uma imagem para encontrar casos semelhantes\n- **Busca textual**: descreva padrões histológicos que deseja encontrar\n- **Filtros demográficos**: filtre por sexo, faixa etária ou ambos\n- **Filtros avançados**: refine por local primário, tecido/órgão de origem, local de ressecção/biópsia, tipo de tecido, tipo de amostra, tipo de doença e estágio patológico (AJCC/TNM)\n\nAcompanhe nesta tela o progresso das ferramentas e os resultados retornados em tempo real."
         }}
       />
