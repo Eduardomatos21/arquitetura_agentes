@@ -15,7 +15,7 @@ from langchain_chroma import Chroma
 from langchain_core.embeddings import Embeddings
 from transformers import XLMRobertaTokenizer
 
-from typing import Optional, Any, Iterable, List, Tuple
+from typing import Optional, Any, Iterable, List, Tuple, Dict
 
 # Logger configurado localmente para evitar configuração global acidental
 logger = logging.getLogger("histopathology.tools")
@@ -48,7 +48,7 @@ MUSK_STATUS = "✅ MUSK disponível"
 # CONFIGURAÇÕES DO MODELO
 # ======================================
 TOP_K = 5
-DEFAULT_VECTORSTORE_DIR = "./streamlit_chroma_vectorstore_precomputed"
+DEFAULT_VECTORSTORE_DIR = "./vectorstore/chroma_vectorstore"
 VECTORSTORE_DIR = os.environ.get("TCGA_VECTORSTORE_DIR", DEFAULT_VECTORSTORE_DIR)
 DEFAULT_VECTORSTORE_COLLECTION = "tcga_images_precomputed"
 VECTORSTORE_COLLECTION = os.environ.get("VECTORSTORE_COLLECTION", DEFAULT_VECTORSTORE_COLLECTION)
@@ -106,7 +106,53 @@ def _coerce_age(value: Optional[Any]) -> Optional[int]:
         return None
 
 
-def _prepare_filters(sex: Optional[str], min_age: Optional[Any], max_age: Optional[Any]):
+def _normalize_filter_sequence(value: Optional[Any]) -> Tuple[Optional[List[str]], Optional[List[str]]]:
+    """Converte entrada arbitrária em lista de strings normalizadas e exibição original."""
+    if value is None:
+        return None, None
+
+    cleaned = _clean_metadata_value(value, allow_list=True)
+    if cleaned is None:
+        return None, None
+
+    if isinstance(cleaned, list):
+        items = cleaned
+    else:
+        items = [cleaned]
+
+    normalized: List[str] = []
+    display: List[str] = []
+    for item in items:
+        text = str(item).strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in normalized:
+            continue
+        normalized.append(lowered)
+        display.append(text)
+
+    if not normalized:
+        return None, None
+    return normalized, display
+
+
+def _prepare_filters(
+    sex: Optional[str],
+    min_age: Optional[Any],
+    max_age: Optional[Any],
+    *,
+    primary_site: Optional[Any] = None,
+    tissue_origin: Optional[Any] = None,
+    site_of_resection: Optional[Any] = None,
+    tissue_type: Optional[Any] = None,
+    specimen_type: Optional[Any] = None,
+    disease_type: Optional[Any] = None,
+    pathologic_stage: Optional[Any] = None,
+    ajcc_t: Optional[Any] = None,
+    ajcc_n: Optional[Any] = None,
+    ajcc_m: Optional[Any] = None,
+):
     """Normaliza filtros e garante consistência."""
     normalized_sex = _normalize_sex_filter(sex)
     normalized_min_age = _coerce_age(min_age)
@@ -144,10 +190,111 @@ def _prepare_filters(sex: Optional[str], min_age: Optional[Any], max_age: Option
         normalized_min_age = midpoint
         normalized_max_age = midpoint
 
-    return normalized_sex, normalized_min_age, normalized_max_age
+    primary_site_norm, primary_site_display = _normalize_filter_sequence(primary_site)
+    tissue_origin_norm, tissue_origin_display = _normalize_filter_sequence(tissue_origin)
+    site_resection_norm, site_resection_display = _normalize_filter_sequence(site_of_resection)
+    tissue_type_norm, tissue_type_display = _normalize_filter_sequence(tissue_type)
+    specimen_type_norm, specimen_type_display = _normalize_filter_sequence(specimen_type)
+    disease_type_norm, disease_type_display = _normalize_filter_sequence(disease_type)
+    pathologic_stage_norm, pathologic_stage_display = _normalize_filter_sequence(pathologic_stage)
+    ajcc_t_norm, ajcc_t_display = _normalize_filter_sequence(ajcc_t)
+    ajcc_n_norm, ajcc_n_display = _normalize_filter_sequence(ajcc_n)
+    ajcc_m_norm, ajcc_m_display = _normalize_filter_sequence(ajcc_m)
+
+    normalized_filters = {
+        "sex": normalized_sex,
+        "min_age": normalized_min_age,
+        "max_age": normalized_max_age,
+        "primary_site": primary_site_norm,
+        "tissue_origin": tissue_origin_norm,
+        "site_of_resection": site_resection_norm,
+        "tissue_type": tissue_type_norm,
+        "specimen_type": specimen_type_norm,
+        "disease_type": disease_type_norm,
+        "pathologic_stage": pathologic_stage_norm,
+        "ajcc_t": ajcc_t_norm,
+        "ajcc_n": ajcc_n_norm,
+        "ajcc_m": ajcc_m_norm,
+    }
+
+    display_filters = {
+        "sex": sex,
+        "min_age": min_age,
+        "max_age": max_age,
+        "primary_site": primary_site_display,
+        "tissue_origin": tissue_origin_display,
+        "site_of_resection": site_resection_display,
+        "tissue_type": tissue_type_display,
+        "specimen_type": specimen_type_display,
+        "disease_type": disease_type_display,
+        "pathologic_stage": pathologic_stage_display,
+        "ajcc_t": ajcc_t_display,
+        "ajcc_n": ajcc_n_display,
+        "ajcc_m": ajcc_m_display,
+    }
+
+    return normalized_filters, display_filters
 
 
 MetadataResult = Tuple[str, float, dict]
+
+
+FILTER_FIELD_MAP: Dict[str, Dict[str, Any]] = {
+    "primary_site": {
+        "keys": ("primary_site.project", "primary_site"),
+        "allow_partial": True,
+    },
+    "tissue_origin": {
+        "keys": ("tissue_or_organ_of_origin.diagnoses",),
+        "allow_partial": True,
+    },
+    "site_of_resection": {
+        "keys": ("site_of_resection_or_biopsy.diagnoses",),
+        "allow_partial": True,
+    },
+    "tissue_type": {
+        "keys": ("tissue_type.samples",),
+        "allow_partial": False,
+    },
+    "specimen_type": {
+        "keys": ("specimen_type.samples",),
+        "allow_partial": False,
+    },
+    "disease_type": {
+        "keys": ("disease_type.project", "disease_type"),
+        "allow_partial": True,
+    },
+    "pathologic_stage": {
+        "keys": ("ajcc_pathologic_stage.diagnoses",),
+        "allow_partial": True,
+    },
+    "ajcc_t": {
+        "keys": ("ajcc_pathologic_t.diagnoses",),
+        "allow_partial": True,
+    },
+    "ajcc_n": {
+        "keys": ("ajcc_pathologic_n.diagnoses",),
+        "allow_partial": True,
+    },
+    "ajcc_m": {
+        "keys": ("ajcc_pathologic_m.diagnoses",),
+        "allow_partial": True,
+    },
+}
+
+
+FILTER_SUMMARY_LABELS: Dict[str, str] = {
+    "primary_site": "local primário",
+    "tissue_origin": "tecido/órgão de origem",
+    "site_of_resection": "sítio de ressecção/biopsia",
+    "tissue_type": "tipo de tecido",
+    "specimen_type": "tipo de amostra",
+    "disease_type": "tipo de doença",
+    "pathologic_stage": "estágio patológico",
+    "ajcc_t": "AJCC T",
+    "ajcc_n": "AJCC N",
+    "ajcc_m": "AJCC M",
+}
 
 
 def _derive_basename_and_ext(doc_path: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -206,22 +353,51 @@ def _resolve_media_info(
     return image_slug, image_ext, display_label, case_code, slide_code
 
 
+def _metadata_field_matches(
+    metadata: dict,
+    field: str,
+    filter_values: Optional[List[str]],
+) -> bool:
+    if not filter_values:
+        return True
+
+    config = FILTER_FIELD_MAP.get(field)
+    if not config:
+        return True
+
+    keys: Tuple[str, ...] = config.get("keys", tuple())
+    allow_partial: bool = bool(config.get("allow_partial", False))
+
+    for key in keys:
+        raw = metadata.get(key)
+        if raw is None:
+            continue
+        cleaned = _clean_metadata_value(raw, allow_list=True)
+        if cleaned is None:
+            continue
+        if isinstance(cleaned, list):
+            candidates = [str(item).strip().lower() for item in cleaned if str(item).strip()]
+        else:
+            candidates = [str(cleaned).strip().lower()]
+        if not candidates:
+            continue
+        for candidate in candidates:
+            for token in filter_values:
+                if allow_partial:
+                    if token in candidate:
+                        return True
+                else:
+                    if candidate == token:
+                        return True
+    return False
+
+
 def _metadata_matches_filters(
     metadata: Optional[dict],
-    sex: Optional[str],
-    min_age: Optional[int],
-    max_age: Optional[int],
+    filters: Dict[str, Any],
 ) -> bool:
     """Retorna True se os metadados atendem aos filtros solicitados."""
     metadata = metadata or {}
-    record_id = (
-        metadata.get("image_case_code")
-        or metadata.get("image_slide_code")
-        or metadata.get("case_id")
-        or metadata.get("image_filename")
-        or metadata.get("resolved_image_path")
-        or metadata.get("id")
-    )
 
     def _pick_canonical_value(keys: Tuple[str, ...]) -> Tuple[Optional[str], Optional[Any]]:
         for key in keys:
@@ -234,8 +410,12 @@ def _metadata_matches_filters(
             return key, cleaned
         return None, None
 
+    sex = filters.get("sex")
+    min_age = filters.get("min_age")
+    max_age = filters.get("max_age")
+
     sex_keys = ("gender.demographic", "gender", "sex")
-    selected_sex_key, patient_sex_raw = _pick_canonical_value(sex_keys)
+    _, patient_sex_raw = _pick_canonical_value(sex_keys)
     patient_sex: Optional[str] = None
     if patient_sex_raw is not None:
         normalized_candidate = str(patient_sex_raw).strip().lower()
@@ -249,8 +429,6 @@ def _metadata_matches_filters(
         "age_at_diagnosis.diagnoses",
         "age_at_index.demographic",
     )
-    selected_age_key: Optional[str] = None
-    patient_age_raw: Optional[Any] = None
     patient_age: Optional[int] = None
     for key in age_keys:
         raw_value = metadata.get(key)
@@ -259,27 +437,24 @@ def _metadata_matches_filters(
         coerced = _coerce_float(raw_value)
         if coerced is None:
             continue
-        selected_age_key = key
-        patient_age_raw = raw_value
         patient_age = int(round(coerced))
         break
 
     if sex is not None:
-        if patient_sex is None:
-            return False
-        if patient_sex != sex:
+        if patient_sex is None or patient_sex != sex:
             return False
 
     if min_age is not None:
-        if patient_age is None:
-            return False
-        if patient_age < min_age:
+        if patient_age is None or patient_age < min_age:
             return False
 
     if max_age is not None:
-        if patient_age is None:
+        if patient_age is None or patient_age > max_age:
             return False
-        if patient_age > max_age:
+
+    for field in FILTER_FIELD_MAP.keys():
+        filter_values = filters.get(field)
+        if filter_values and not _metadata_field_matches(metadata, field, filter_values):
             return False
 
     return True
@@ -287,16 +462,14 @@ def _metadata_matches_filters(
 
 def _filter_metadata_results(
     candidates: Iterable[MetadataResult],
-    sex: Optional[str],
-    min_age: Optional[int],
-    max_age: Optional[int],
+    filters: Dict[str, Any],
 ) -> Tuple[List[MetadataResult], List[MetadataResult]]:
     """Separa resultados que atendem aos filtros e os demais."""
     matched: List[MetadataResult] = []
     remainder: List[MetadataResult] = []
 
     for doc_path, distance, metadata in candidates:
-        if _metadata_matches_filters(metadata, sex, min_age, max_age):
+        if _metadata_matches_filters(metadata, filters):
             matched.append((doc_path, distance, metadata))
         else:
             remainder.append((doc_path, distance, metadata))
@@ -304,19 +477,37 @@ def _filter_metadata_results(
     return matched, remainder
 
 
-def _summarize_filters(sex: Optional[str], min_age: Optional[int], max_age: Optional[int]) -> Optional[str]:
+def _summarize_filters(filters: Dict[str, Any], display_filters: Dict[str, Any]) -> Optional[str]:
     """Gera texto breve com os filtros aplicados."""
     parts = []
+    sex = filters.get("sex")
+    min_age = filters.get("min_age")
+    max_age = filters.get("max_age")
+
     if sex == "female":
         parts.append("sexo: feminino")
     elif sex == "male":
         parts.append("sexo: masculino")
+
     if min_age is not None and max_age is not None:
         parts.append(f"idade aproximada: {min_age}-{max_age} anos")
     elif min_age is not None:
         parts.append(f"idade mínima: {min_age} anos")
     elif max_age is not None:
         parts.append(f"idade máxima: {max_age} anos")
+
+    for field, label in FILTER_SUMMARY_LABELS.items():
+        normalized_values = filters.get(field)
+        if not normalized_values:
+            continue
+        display_values = display_filters.get(field) or normalized_values
+        if isinstance(display_values, list):
+            formatted = ", ".join(str(item) for item in display_values)
+        else:
+            formatted = str(display_values)
+        if formatted:
+            parts.append(f"{label}: {formatted}")
+
     return ", ".join(parts) if parts else None
 
 
@@ -760,6 +951,16 @@ def search_by_image_query(
     sex: Optional[str] = None,
     min_age: Optional[Any] = None,
     max_age: Optional[Any] = None,
+    primary_site: Optional[Any] = None,
+    tissue_origin: Optional[Any] = None,
+    site_of_resection: Optional[Any] = None,
+    tissue_type: Optional[Any] = None,
+    specimen_type: Optional[Any] = None,
+    disease_type: Optional[Any] = None,
+    pathologic_stage: Optional[Any] = None,
+    ajcc_t: Optional[Any] = None,
+    ajcc_n: Optional[Any] = None,
+    ajcc_m: Optional[Any] = None,
     tool_context = None,
 ) -> str:
     """Busca imagens de lâminas histológicas semelhantes a partir de uma imagem de consulta.
@@ -777,7 +978,17 @@ def search_by_image_query(
           sex: Filtra por sexo biológico registrado no dataset ("female" ou "male").
               Aceita variantes em português como "feminino" ou "masculino".
           min_age: Idade mínima aproximada do paciente (inteiro).
-          max_age: Idade máxima aproximada do paciente (inteiro).
+                    max_age: Idade máxima aproximada do paciente (inteiro).
+                    primary_site: Local anatômico primário do caso (string ou lista).
+                    tissue_origin: Tecido ou órgão de origem da amostra.
+                    site_of_resection: Sítio de ressecção/biópsia registrado.
+                    tissue_type: Tipo de tecido (por exemplo, "Tumor", "Solid Tissue").
+                    specimen_type: Tipo de amostra (por exemplo, "Solid Tissue").
+                    disease_type: Tipo de doença associado ao caso.
+                    pathologic_stage: Estágio patológico AJCC.
+                    ajcc_t: Categoria AJCC T.
+                    ajcc_n: Categoria AJCC N.
+                    ajcc_m: Categoria AJCC M.
         tool_context: Contexto da ferramenta (fornecido automaticamente pelo ADK).
     
     Returns:
@@ -793,15 +1004,50 @@ def search_by_image_query(
     # Recuperar imagem diretamente do contexto
     image_bytes = None
     mime_type = 'image/png'
-    sex, min_age, max_age = _prepare_filters(sex, min_age, max_age)
-    filters_applied = any(v is not None for v in (sex, min_age, max_age))
-    logger.info(
-        "search_by_image_query invoked top_k=%s sex=%s min_age=%s max_age=%s",
-        top_k,
+    normalized_filters, display_filters = _prepare_filters(
         sex,
         min_age,
         max_age,
+        primary_site=primary_site,
+        tissue_origin=tissue_origin,
+        site_of_resection=site_of_resection,
+        tissue_type=tissue_type,
+        specimen_type=specimen_type,
+        disease_type=disease_type,
+        pathologic_stage=pathologic_stage,
+        ajcc_t=ajcc_t,
+        ajcc_n=ajcc_n,
+        ajcc_m=ajcc_m,
     )
+    filter_keys = [
+        "sex",
+        "min_age",
+        "max_age",
+        "primary_site",
+        "tissue_origin",
+        "site_of_resection",
+        "tissue_type",
+        "specimen_type",
+        "disease_type",
+        "pathologic_stage",
+        "ajcc_t",
+        "ajcc_n",
+        "ajcc_m",
+    ]
+    filters_applied = any(
+        (normalized_filters.get(key) is not None)
+        if key in {"sex", "min_age", "max_age"}
+        else bool(normalized_filters.get(key))
+        for key in filter_keys
+    )
+    visible_filters: Dict[str, Any] = {}
+    for key, value in normalized_filters.items():
+        if key in {"sex", "min_age", "max_age"}:
+            if value is not None:
+                visible_filters[key] = value
+        elif value:
+            visible_filters[key] = value
+    logger.info("search_by_image_query top_k=%s filters=%s", top_k, visible_filters)
     if tool_context is not None:
         logger.info("ToolContext provided; attempting inline extraction")
         image_bytes, mime_type = _extract_image_from_context(tool_context)
@@ -893,9 +1139,7 @@ def search_by_image_query(
         if filters_applied:
             matched, remainder = _filter_metadata_results(
                 candidates,
-                sex,
-                min_age,
-                max_age,
+                normalized_filters,
             )
             if len(matched) < top_k and remainder:
                 needed = top_k - len(matched)
@@ -911,7 +1155,7 @@ def search_by_image_query(
             candidates = candidates[:top_k]
 
         if not candidates:
-            filter_msg = _summarize_filters(sex, min_age, max_age)
+            filter_msg = _summarize_filters(normalized_filters, display_filters)
             if filter_msg:
                 response = (
                     "⚠️ Nenhum resultado encontrado com os filtros aplicados. "
@@ -923,9 +1167,8 @@ def search_by_image_query(
                         "source": "image",
                         "timestamp": int(time.time()),
                         "filters": {
-                            "sex": sex,
-                            "minAge": min_age,
-                            "maxAge": max_age,
+                            "normalized": normalized_filters,
+                            "display": display_filters,
                             "summary": filter_msg,
                             "fallbackUsed": False,
                         },
@@ -942,9 +1185,8 @@ def search_by_image_query(
                     "source": "image",
                     "timestamp": int(time.time()),
                     "filters": {
-                        "sex": sex,
-                        "minAge": min_age,
-                        "maxAge": max_age,
+                        "normalized": normalized_filters,
+                        "display": display_filters,
                         "summary": None,
                         "fallbackUsed": False,
                     },
@@ -956,7 +1198,7 @@ def search_by_image_query(
 
         # Formatar resultados como string legível
         result_lines = [f"\n📊 Resultados da busca por imagem (Imagem → Imagens semelhantes):"]
-        filter_summary = _summarize_filters(sex, min_age, max_age)
+        filter_summary = _summarize_filters(normalized_filters, display_filters)
         fallback_flag = fallback_used
         if filter_summary:
             result_lines.append(f"  ↳ Filtros aplicados: {filter_summary}")
@@ -984,7 +1226,7 @@ def search_by_image_query(
             except (ValueError, TypeError):
                 patient_age = None
             matches_filters = (
-                not filters_applied or _metadata_matches_filters(metadata, sex, min_age, max_age)
+                not filters_applied or _metadata_matches_filters(metadata, normalized_filters)
             )
             extra_bits = []
             if patient_sex:
@@ -1029,9 +1271,8 @@ def search_by_image_query(
             "source": "image",
             "timestamp": int(time.time()),
             "filters": {
-                "sex": sex,
-                "minAge": min_age,
-                "maxAge": max_age,
+                "normalized": normalized_filters,
+                "display": display_filters,
                 "summary": filter_summary,
                 "fallbackUsed": fallback_flag,
             },
@@ -1053,6 +1294,16 @@ def search_by_text_query(
     sex: Optional[str] = None,
     min_age: Optional[Any] = None,
     max_age: Optional[Any] = None,
+    primary_site: Optional[Any] = None,
+    tissue_origin: Optional[Any] = None,
+    site_of_resection: Optional[Any] = None,
+    tissue_type: Optional[Any] = None,
+    specimen_type: Optional[Any] = None,
+    disease_type: Optional[Any] = None,
+    pathologic_stage: Optional[Any] = None,
+    ajcc_t: Optional[Any] = None,
+    ajcc_n: Optional[Any] = None,
+    ajcc_m: Optional[Any] = None,
     tool_context = None,
 ) -> str:
     """Busca imagens de lâminas histológicas a partir de uma descrição textual.
@@ -1071,6 +1322,16 @@ def search_by_text_query(
               Aceita variantes em português como "feminino" ou "masculino".
           min_age: Idade mínima aproximada do paciente (inteiro).
           max_age: Idade máxima aproximada do paciente (inteiro).
+          primary_site: Local anatômico primário do caso (string ou lista).
+          tissue_origin: Tecido ou órgão de origem da amostra.
+          site_of_resection: Sítio de ressecção/biópsia registrado.
+          tissue_type: Tipo de tecido (por exemplo, "Tumor", "Solid Tissue").
+          specimen_type: Tipo de amostra (por exemplo, "Solid Tissue").
+          disease_type: Tipo de doença associado ao caso.
+          pathologic_stage: Estágio patológico AJCC.
+          ajcc_t: Categoria AJCC T.
+          ajcc_n: Categoria AJCC N.
+          ajcc_m: Categoria AJCC M.
     
     Returns:
         String formatada contendo os resultados da busca, incluindo:
@@ -1082,14 +1343,53 @@ def search_by_text_query(
     >>> search_by_text_query("gastric adenocarcinoma with diffuse pattern", top_k=3)
     "Resultado #1: 92.15% de similaridade - TCGA-D7-A4YV-01Z-00-DX1\n..."
     """
-    sex, min_age, max_age = _prepare_filters(sex, min_age, max_age)
-    filters_applied = any(v is not None for v in (sex, min_age, max_age))
-    logger.info(
-        "search_by_text_query invoked top_k=%s sex=%s min_age=%s max_age=%s query='%s'",
-        top_k,
+    normalized_filters, display_filters = _prepare_filters(
         sex,
         min_age,
         max_age,
+        primary_site=primary_site,
+        tissue_origin=tissue_origin,
+        site_of_resection=site_of_resection,
+        tissue_type=tissue_type,
+        specimen_type=specimen_type,
+        disease_type=disease_type,
+        pathologic_stage=pathologic_stage,
+        ajcc_t=ajcc_t,
+        ajcc_n=ajcc_n,
+        ajcc_m=ajcc_m,
+    )
+    filter_keys = [
+        "sex",
+        "min_age",
+        "max_age",
+        "primary_site",
+        "tissue_origin",
+        "site_of_resection",
+        "tissue_type",
+        "specimen_type",
+        "disease_type",
+        "pathologic_stage",
+        "ajcc_t",
+        "ajcc_n",
+        "ajcc_m",
+    ]
+    filters_applied = any(
+        (normalized_filters.get(key) is not None)
+        if key in {"sex", "min_age", "max_age"}
+        else bool(normalized_filters.get(key))
+        for key in filter_keys
+    )
+    visible_filters: Dict[str, Any] = {}
+    for key, value in normalized_filters.items():
+        if key in {"sex", "min_age", "max_age"}:
+            if value is not None:
+                visible_filters[key] = value
+        elif value:
+            visible_filters[key] = value
+    logger.info(
+        "search_by_text_query top_k=%s filters=%s query='%s'",
+        top_k,
+        visible_filters,
         text_query[:80],
     )
     model, _ = load_musk_model()
@@ -1137,9 +1437,7 @@ def search_by_text_query(
         if filters_applied:
             matched, remainder = _filter_metadata_results(
                 candidates,
-                sex,
-                min_age,
-                max_age,
+                normalized_filters,
             )
             if len(matched) < top_k and remainder:
                 needed = top_k - len(matched)
@@ -1155,7 +1453,7 @@ def search_by_text_query(
             candidates = candidates[:top_k]
 
         if not candidates:
-            filter_msg = _summarize_filters(sex, min_age, max_age)
+            filter_msg = _summarize_filters(normalized_filters, display_filters)
             if filter_msg:
                 response = (
                     "⚠️ Nenhum resultado encontrado com os filtros aplicados. "
@@ -1167,9 +1465,8 @@ def search_by_text_query(
                         "source": "text",
                         "timestamp": int(time.time()),
                         "filters": {
-                            "sex": sex,
-                            "minAge": min_age,
-                            "maxAge": max_age,
+                            "normalized": normalized_filters,
+                            "display": display_filters,
                             "summary": filter_msg,
                             "fallbackUsed": False,
                         },
@@ -1187,9 +1484,8 @@ def search_by_text_query(
                     "source": "text",
                     "timestamp": int(time.time()),
                     "filters": {
-                        "sex": sex,
-                        "minAge": min_age,
-                        "maxAge": max_age,
+                        "normalized": normalized_filters,
+                        "display": display_filters,
                         "summary": None,
                         "fallbackUsed": False,
                     },
@@ -1202,7 +1498,7 @@ def search_by_text_query(
 
         # Formatar resultados como string legível
         result_lines = [f"\n📊 Resultados da busca textual (Texto → Imagens correspondentes):"]
-        filter_summary = _summarize_filters(sex, min_age, max_age)
+        filter_summary = _summarize_filters(normalized_filters, display_filters)
         fallback_flag = fallback_used
         if filter_summary:
             result_lines.append(f"  ↳ Filtros aplicados: {filter_summary}")
@@ -1230,7 +1526,7 @@ def search_by_text_query(
             except (ValueError, TypeError):
                 patient_age = None
             matches_filters = (
-                not filters_applied or _metadata_matches_filters(metadata, sex, min_age, max_age)
+                not filters_applied or _metadata_matches_filters(metadata, normalized_filters)
             )
             extra_bits = []
             if patient_sex:
@@ -1275,9 +1571,8 @@ def search_by_text_query(
             "source": "text",
             "timestamp": int(time.time()),
             "filters": {
-                "sex": sex,
-                "minAge": min_age,
-                "maxAge": max_age,
+                "normalized": normalized_filters,
+                "display": display_filters,
                 "summary": filter_summary,
                 "fallbackUsed": fallback_flag,
             },

@@ -322,9 +322,21 @@ def before_model_modifier(
         "menos de 30" as max_age=30, and "entre 40 e 60" as min_age=40, max_age=60. Support Portuguese variations such as
         "idade > 50", "com 55 anos", or "faixa etária 45-65".
 
+        When localização/anatomia or staging filters are present, map them to the appropriate parameters:
+        - primary_site → "local primário", "primary site"
+        - tissue_origin → "tecido/órgão de origem"
+        - site_of_resection → "sítio de ressecção", "biopsy site"
+        - tissue_type → "tipo de tecido"
+        - specimen_type → "tipo de amostra"
+        - disease_type → "tipo de doença", "diagnóstico"
+        - pathologic_stage → "estágio patológico", "AJCC stage"
+        - ajcc_t / ajcc_n / ajcc_m → componentes TNM.
+
+        Passe valores textuais em inglês quando possível (ex.: "stomach", "tumor"), mas respeite a grafia solicitada pelo usuário.
+
         Examples:
-        - Para texto: search_by_text_query(text_query="descrição", sex="female", min_age=50)
-        - Para imagem: search_by_image_query(top_k=5, sex="male", max_age=30)
+        - Para texto: search_by_text_query(text_query="descrição", sex="female", min_age=50, primary_site="stomach")
+        - Para imagem: search_by_image_query(top_k=5, sex="male", max_age=30, pathologic_stage="stage ii")
         
         IMPORTANT: If the user sends a very short message (like a single letter) along with an image,
         interpret it as a request to analyze the image and search for similar ones.
@@ -415,6 +427,12 @@ histopathology_agent = LlmAgent(
         - "menos de 30 anos" ⇒ max_age=30
         - "entre 40 e 60 anos" ⇒ min_age=40 e max_age=60
         Combine filtros conforme necessário tanto para imagens quanto texto.
+
+        Localização anatômica e estágios clínicos também devem ser convertidos em argumentos das ferramentas:
+        - primary_site, tissue_origin, site_of_resection para campos como "local primário", "tecido de origem", "sítio de biópsia".
+        - tissue_type, specimen_type, disease_type para "tipo de tecido", "tipo de amostra", "tipo de doença".
+        - pathologic_stage, ajcc_t, ajcc_n, ajcc_m para solicitações relacionadas a estágio AJCC/TNM.
+        Passe strings consistentes com o que o usuário pediu (ex.: "Fundus of stomach", "Stage II").
         
         CRITICAL: NEVER include raw image data (base64 strings, file paths, URIs, or inline_data parts) in your responses.
         You must ONLY respond with plain text or tool results; do not echo user images or attach blobs.

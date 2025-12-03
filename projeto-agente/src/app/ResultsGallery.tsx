@@ -46,9 +46,8 @@ export type SharedSearchResults = {
   source: 'image' | 'text';
   timestamp: number;
   filters?: {
-    sex?: string | null;
-    minAge?: number | null;
-    maxAge?: number | null;
+    normalized?: Record<string, unknown> | null;
+    display?: Record<string, unknown> | null;
     summary?: string | null;
     fallbackUsed?: boolean;
   } | null;
