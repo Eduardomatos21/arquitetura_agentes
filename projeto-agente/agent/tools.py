@@ -214,33 +214,72 @@ def _metadata_matches_filters(
 ) -> bool:
     """Retorna True se os metadados atendem aos filtros solicitados."""
     metadata = metadata or {}
-    patient_sex = metadata.get("sex")
-    patient_age = metadata.get("age_approx")
-    if patient_age is None:
-        patient_age = metadata.get("age")
+    record_id = (
+        metadata.get("image_case_code")
+        or metadata.get("image_slide_code")
+        or metadata.get("case_id")
+        or metadata.get("image_filename")
+        or metadata.get("resolved_image_path")
+        or metadata.get("id")
+    )
 
-    if patient_sex:
-        patient_sex = str(patient_sex).strip().lower()
-    if patient_age is not None:
-        try:
-            patient_age = int(float(patient_age))
-        except (ValueError, TypeError):
-            patient_age = None
+    def _pick_canonical_value(keys: Tuple[str, ...]) -> Tuple[Optional[str], Optional[Any]]:
+        for key in keys:
+            raw = metadata.get(key)
+            if raw is None:
+                continue
+            cleaned = _clean_metadata_value(raw)
+            if cleaned is None:
+                continue
+            return key, cleaned
+        return None, None
+
+    sex_keys = ("gender.demographic", "gender", "sex")
+    selected_sex_key, patient_sex_raw = _pick_canonical_value(sex_keys)
+    patient_sex: Optional[str] = None
+    if patient_sex_raw is not None:
+        normalized_candidate = str(patient_sex_raw).strip().lower()
+        if normalized_candidate in {"male", "female"}:
+            patient_sex = normalized_candidate
+        else:
+            patient_sex = _normalize_sex_filter(str(patient_sex_raw))
+
+    age_keys = (
+        "age_at_earliest_diagnosis_in_years.diagnoses.xena_derived",
+        "age_at_diagnosis.diagnoses",
+        "age_at_index.demographic",
+    )
+    selected_age_key: Optional[str] = None
+    patient_age_raw: Optional[Any] = None
+    patient_age: Optional[int] = None
+    for key in age_keys:
+        raw_value = metadata.get(key)
+        if raw_value is None:
+            continue
+        coerced = _coerce_float(raw_value)
+        if coerced is None:
+            continue
+        selected_age_key = key
+        patient_age_raw = raw_value
+        patient_age = int(round(coerced))
+        break
 
     if sex is not None:
         if patient_sex is None:
             return False
-        if patient_sex not in {"male", "female"}:
-            patient_sex = _normalize_sex_filter(patient_sex)
         if patient_sex != sex:
             return False
 
     if min_age is not None:
-        if patient_age is None or patient_age < min_age:
+        if patient_age is None:
+            return False
+        if patient_age < min_age:
             return False
 
     if max_age is not None:
-        if patient_age is None or patient_age > max_age:
+        if patient_age is None:
+            return False
+        if patient_age > max_age:
             return False
 
     return True
@@ -505,18 +544,18 @@ def _build_structured_entry(
     case_code = case_code or safe_metadata.get("image_case_code")
     slide_code = slide_code or safe_metadata.get("image_slide_code")
     if not patient_sex:
-        fallback_sex = pick_value(("sex", "gender.demographic"))
+        # Prefer canonical metadata naming for sex first
+        fallback_sex = pick_value(("gender.demographic", "gender", "sex"))
         if fallback_sex:
             normalized = fallback_sex.strip().lower()
             patient_sex = normalized if normalized in {"male", "female"} else fallback_sex.strip()
     if patient_age is None:
-        fallback_age = age_at_index_years or age_at_diagnosis_years
-        if fallback_age is not None:
-            patient_age = int(round(fallback_age))
-    if patient_age is None:
-        direct_age = _coerce_float(safe_metadata.get("age_approx") or safe_metadata.get("age"))
-        if direct_age is not None:
-            patient_age = int(round(direct_age))
+        # Reuse canonical age fields to infer display value
+        canonical_age_candidates = (age_at_diagnosis_years, age_at_index_years)
+        for candidate in canonical_age_candidates:
+            if candidate is not None:
+                patient_age = int(round(candidate))
+                break
 
     def normalize_numeric_display(value: Optional[float]) -> Optional[float]:
         if value is None:
@@ -539,8 +578,8 @@ def _build_structured_entry(
         "imageExt": image_ext,
         "caseCode": case_code,
         "slideCode": slide_code,
-        "sex": patient_sex or safe_metadata.get("sex"),
-        "ageApprox": patient_age or safe_metadata.get("age_approx") or safe_metadata.get("age"),
+        "sex": patient_sex or safe_metadata.get("gender") or safe_metadata.get("gender.demographic") or safe_metadata.get("sex"),
+        "ageApprox": patient_age or safe_metadata.get("age_at_index") or safe_metadata.get("age_approx") or safe_metadata.get("age"),
         "ageAtDiagnosis": age_at_diagnosis_display,
         "diagnosisPrimary": diagnosis_primary,
         "diagnosisSecondary": diagnosis_secondary,
@@ -835,7 +874,7 @@ def search_by_image_query(
         logger.info("Image embedding length=%s l2_norm=%.4f", len(query_embedding), norm)
         
         try:
-            n_results = top_k if not filters_applied else 100
+            n_results = top_k if not filters_applied else 300
             raw = collection.query(
                 query_embeddings=[query_embedding],
                 n_results=n_results,
@@ -935,10 +974,11 @@ def search_by_image_query(
             image_slug, image_ext, display, case_code, slide_code = _resolve_media_info(metadata, doc_path)
             resolved_path = metadata.get("resolved_image_path") if isinstance(metadata, dict) else None
             display_str = str(display or image_slug or doc_path or f"resultado_{i:02d}")
-            patient_sex = metadata.get("sex") if isinstance(metadata, dict) else None
-            patient_age = metadata.get("age_approx") if isinstance(metadata, dict) else None
+            # Use current metadata field names
+            patient_sex = metadata.get("gender") if isinstance(metadata, dict) else None
+            patient_age = metadata.get("age_at_index") if isinstance(metadata, dict) else None
             if patient_age is None and isinstance(metadata, dict):
-                patient_age = metadata.get("age")
+                patient_age = metadata.get("age_at_index.demographic") or metadata.get("age_at_diagnosis.diagnoses")
             try:
                 patient_age = int(float(patient_age)) if patient_age is not None else None
             except (ValueError, TypeError):
@@ -1180,10 +1220,11 @@ def search_by_text_query(
             image_slug, image_ext, display, case_code, slide_code = _resolve_media_info(metadata, doc_path)
             resolved_path = metadata.get("resolved_image_path") if isinstance(metadata, dict) else None
             display_str = str(display or image_slug or doc_path or f"resultado_{i:02d}")
-            patient_sex = metadata.get("sex") if isinstance(metadata, dict) else None
-            patient_age = metadata.get("age_approx") if isinstance(metadata, dict) else None
+            # Use current metadata field names
+            patient_sex = metadata.get("gender") if isinstance(metadata, dict) else None
+            patient_age = metadata.get("age_at_index") if isinstance(metadata, dict) else None
             if patient_age is None and isinstance(metadata, dict):
-                patient_age = metadata.get("age")
+                patient_age = metadata.get("age_at_index.demographic") or metadata.get("age_at_diagnosis.diagnoses")
             try:
                 patient_age = int(float(patient_age)) if patient_age is not None else None
             except (ValueError, TypeError):
