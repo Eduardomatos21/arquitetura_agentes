@@ -994,12 +994,12 @@ def search_by_image_query(
     Returns:
         String formatada contendo os resultados da busca, incluindo:
         - Posição do resultado
-        - Percentual de proximidade vetorial
+        - Escala de proximidade vetorial (0 a 100; menor é melhor)
         - Identificador ou descrição da imagem encontrada
     
     Examples:
         >>> search_by_image_query(top_k=3)
-        "Resultado #1: 85.23% de proximidade vetorial - TCGA-D7-A4YV-01Z-00-DX1\n..."
+        "Resultado #1: 85.230 de proximidade vetorial - TCGA-D7-A4YV-01Z-00-DX1\n..."
     """
     # Recuperar imagem diretamente do contexto
     image_bytes = None
@@ -1212,7 +1212,7 @@ def search_by_image_query(
         structured_results: List[dict] = []
 
         for i, (doc_path, distance, metadata) in enumerate(candidates, start=1):
-            similarity_percent = max(0.0, min(100.0, (1.0 - float(distance)) * 100.0))
+            proximity_percent = max(0.0, float(distance) * 100.0)
             image_slug, image_ext, display, case_code, slide_code = _resolve_media_info(metadata, doc_path)
             resolved_path = metadata.get("resolved_image_path") if isinstance(metadata, dict) else None
             display_str = str(display or image_slug or doc_path or f"resultado_{i:02d}")
@@ -1237,20 +1237,20 @@ def search_by_image_query(
                 extra_bits.append("⚠️ fora dos filtros")
             extras = f" ({', '.join(extra_bits)})" if extra_bits else ""
             result_line = (
-                f"  #{i:02d} | {similarity_percent:.2f}% de proximidade vetorial | {display_str}{extras}"
+                f"  #{i:02d} | {proximity_percent:.3f} de proximidade vetorial | {display_str}{extras}"
             )
             result_lines.append(result_line)
             logger.info(
-                "Image result #%s distance=%.4f similarity=%.2f doc=%s",
+                "Image result #%s distance=%.4f proximity_percent=%.3f doc=%s",
                 i,
                 distance,
-                similarity_percent,
+                proximity_percent,
                 display_str,
             )
             structured_results.append(
                 _build_structured_entry(
                     rank=i,
-                    similarity_percent=similarity_percent,
+                    similarity_percent=proximity_percent,
                     image_slug=image_slug,
                     display_label=display_str,
                     doc_path=doc_path,
@@ -1264,6 +1264,7 @@ def search_by_image_query(
                     resolved_path=resolved_path,
                 )
             )
+        result_lines.append("  ↳ Escala de proximidade: 0 a 100 (quanto mais próximo de 0, maior a proximidade vetorial).")
         result_lines.append("—" * 60)
         logger.info("Formatted image search response with %s entries", len(result_lines) - 2)
 
@@ -1336,12 +1337,12 @@ def search_by_text_query(
     Returns:
         String formatada contendo os resultados da busca, incluindo:
         - Posição do resultado
-        - Percentual de proximidade vetorial
+        - Escala de proximidade vetorial (0 a 100; menor é melhor)
         - Identificador ou descrição da imagem encontrada
         
     Example:
     >>> search_by_text_query("gastric adenocarcinoma with diffuse pattern", top_k=3)
-    "Resultado #1: 92.15% de proximidade vetorial - TCGA-D7-A4YV-01Z-00-DX1\n..."
+    "Resultado #1: 92.150 de proximidade vetorial - TCGA-D7-A4YV-01Z-00-DX1\n..."
     """
     normalized_filters, display_filters = _prepare_filters(
         sex,
@@ -1512,7 +1513,7 @@ def search_by_text_query(
         structured_results: List[dict] = []
 
         for i, (doc_path, distance, metadata) in enumerate(candidates, start=1):
-            similarity_percent = max(0.0, min(100.0, (1.0 - float(distance)) * 100.0))
+            proximity_percent = max(0.0, float(distance) * 100.0)
             image_slug, image_ext, display, case_code, slide_code = _resolve_media_info(metadata, doc_path)
             resolved_path = metadata.get("resolved_image_path") if isinstance(metadata, dict) else None
             display_str = str(display or image_slug or doc_path or f"resultado_{i:02d}")
@@ -1537,20 +1538,20 @@ def search_by_text_query(
                 extra_bits.append("⚠️ fora dos filtros")
             extras = f" ({', '.join(extra_bits)})" if extra_bits else ""
             result_line = (
-                f"  #{i:02d} | {similarity_percent:.2f}% de proximidade vetorial | {display_str}{extras}"
+                f"  #{i:02d} | {proximity_percent:.3f} de proximidade vetorial | {display_str}{extras}"
             )
             result_lines.append(result_line)
             logger.info(
-                "Text result #%s distance=%.4f similarity=%.2f doc=%s",
+                "Text result #%s distance=%.4f proximity_percent=%.3f doc=%s",
                 i,
                 distance,
-                similarity_percent,
+                proximity_percent,
                 display_str,
             )
             structured_results.append(
                 _build_structured_entry(
                     rank=i,
-                    similarity_percent=similarity_percent,
+                    similarity_percent=proximity_percent,
                     image_slug=image_slug,
                     display_label=display_str,
                     doc_path=doc_path,
@@ -1564,6 +1565,7 @@ def search_by_text_query(
                     resolved_path=resolved_path,
                 )
             )
+        result_lines.append("  ↳ Escala de proximidade: 0 a 100 (quanto mais próximo de 0, maior a proximidade vetorial).")
         result_lines.append("—" * 60)
         logger.info("Formatted text search response with %s entries", len(result_lines) - 2)
 

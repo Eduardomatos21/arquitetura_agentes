@@ -104,7 +104,7 @@ function formatSimilarity(value: number): string {
   if (Number.isNaN(value)) {
     return '–';
   }
-  return `${value.toFixed(2)}%`;
+  return value.toFixed(3);
 }
 
 function formatSex(value?: string | null): string | null {
@@ -454,6 +454,7 @@ function ImagePreviewModal({
                 <p className="text-xs uppercase tracking-wide text-white/60">{secondaryIdentifier}</p>
               )}
               <p className="text-sm text-white/70">Proximidade vetorial: {formatSimilarity(result.similarity)}</p>
+              <p className="text-xs text-white/60">Escala de 0 a 100; valores menores indicam maior proximidade.</p>
               {result.matchedFilters === false && (
                 <p className="mt-2 rounded-md bg-amber-500/20 px-3 py-2 text-amber-200">
                   Este resultado foi incluído para completar o top-k, mas não atende a todos os filtros.
