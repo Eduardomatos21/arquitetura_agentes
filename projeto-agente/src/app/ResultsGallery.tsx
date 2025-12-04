@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 export type SearchResultItem = {
   rank: number;
@@ -347,7 +348,24 @@ function ImagePreviewModal({
     return () => window.removeEventListener('pointerdown', handlePointerDown);
   }, [modal, zoomed, onClose]);
 
+  useEffect(() => {
+    if (!modal) {
+      return;
+    }
+
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = originalOverflow;
+    };
+  }, [modal]);
+
   if (!modal) {
+    return null;
+  }
+
+  const portalTarget = typeof document !== 'undefined' ? document.body : null;
+  if (!portalTarget) {
     return null;
   }
 
@@ -400,9 +418,9 @@ function ImagePreviewModal({
     return trimmed ? trimmed : '—';
   };
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm sm:p-6"
+      className="fixed inset-0 z-50 flex min-h-screen items-center justify-center bg-black/60 p-4 backdrop-blur-sm sm:p-6"
       onClick={(e) => {
         if (e.currentTarget === e.target) {
           if (zoomed) {
@@ -415,7 +433,7 @@ function ImagePreviewModal({
     >
       <div
         ref={modalContainerRef}
-        className="relative mx-auto flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl bg-slate-950/95 text-white shadow-2xl ring-1 ring-white/10"
+        className="relative mx-auto flex min-h-0 w-full max-w-[calc(100dvw-2rem)] flex-col overflow-hidden rounded-3xl bg-slate-950/95 text-white shadow-2xl ring-1 ring-white/10 sm:max-w-[calc(100dvw-3rem)] md:max-w-4xl max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-3rem)]"
       >
         <button
           type="button"
@@ -427,7 +445,7 @@ function ImagePreviewModal({
         >
           Fechar
         </button>
-        <div className="grid flex-1 gap-5 overflow-y-auto p-5 sm:p-6 md:grid-cols-2 md:gap-6">
+        <div className="grid flex-1 min-h-0 gap-5 overflow-y-auto p-5 sm:p-6 md:grid-cols-2 md:gap-6">
           <div className="flex flex-col gap-4 md:gap-5">
             <div className="rounded-2xl bg-white/10 p-4 text-sm text-white/80 sm:p-5">
               <p className="text-xs uppercase tracking-[0.2em] text-white/60">Identificador</p>
@@ -531,7 +549,7 @@ function ImagePreviewModal({
       </div>
       {zoomed && !imageError && (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4 sm:p-6"
+          className="fixed inset-0 z-[60] flex min-h-screen items-center justify-center bg-black/80 p-4 sm:p-6"
           onClick={(e) => {
             if (e.currentTarget === e.target) {
               setZoomed(false);
@@ -540,7 +558,7 @@ function ImagePreviewModal({
         >
           <div
             ref={zoomContainerRef}
-            className="relative flex h-full w-full max-h-[90vh] max-w-[94vw] items-center justify-center overflow-visible"
+            className="relative flex h-full min-h-0 w-full max-h-[calc(100dvh-2rem)] max-w-[94vw] items-center justify-center overflow-visible sm:max-h-[calc(100dvh-3rem)]"
           >
             <button
               type="button"
@@ -558,7 +576,7 @@ function ImagePreviewModal({
         </div>
       )}
     </div>
-  );
+  , portalTarget);
 }
 
 export function ResultsGallery({ data, themeColor }: ResultsGalleryProps) {
