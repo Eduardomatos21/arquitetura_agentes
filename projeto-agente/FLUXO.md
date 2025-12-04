@@ -150,11 +150,15 @@ Content(role="user", parts=[
   ],
   "tools": [search_by_image_query, search_by_text_query],
   "system_instruction": """
-    ... instrução do sistema com exemplos de filtros demográficos:
+    ... instrução do sistema com exemplos de filtros demográficos e clínicos:
     - "mulher", "sexo feminino" → sex="female"
     - "homem", "sexo masculino" → sex="male"
     - "mais de 50 anos" → min_age=50
     - "entre 40 e 60 anos" → min_age=40, max_age=60
+    - "local primário: estômago" → primary_site="Stomach"
+    - "tipo de tecido: tumor" → tissue_type="Tumor"
+    - "estágio T2" → ajcc_t="T2"
+    - "tecido sólido" → specimen_type="Solid Tissue"
   """
 }
 ```
@@ -170,7 +174,7 @@ Content(role="user", parts=[
   }
 }
 
-# Com filtros de metadados
+# Com filtros demográficos
 {
   "function_call": {
     "name": "search_by_image_query",
@@ -179,6 +183,21 @@ Content(role="user", parts=[
       "sex": "female",      # Detectado de "mulher" ou "feminino"
       "min_age": 50,        # Detectado de "mais de 50 anos"
       "max_age": 65         # Detectado de "até 65 anos"
+    }
+  }
+}
+
+# Com filtros clínicos avançados
+{
+  "function_call": {
+    "name": "search_by_image_query",
+    "args": {
+      "top_k": 5,
+      "primary_site": "Stomach",           # Local primário
+      "tissue_type": "Tumor",              # Tipo de tecido
+      "specimen_type": "Solid Tissue",     # Tipo de amostra
+      "disease_type": "Adenocarcinoma",    # Tipo de doença
+      "ajcc_t": "T2"                       # Estágio AJCC T
     }
   }
 }
@@ -258,23 +277,32 @@ with torch.inference_mode():
 query_embedding = features.cpu().numpy().flatten().tolist()
 
 # 5. Busca no Chroma (banco vetorial)
-# Se filtros aplicados, busca 3x mais candidatos para compensar filtragem
-n_results = top_k if not filters_applied else min(50, max(top_k * 3, top_k))
+# Se filtros aplicados, busca até 300 candidatos para compensar filtragem
+n_results = top_k if not filters_applied else min(300, max(top_k * 3, top_k))
 
 results = collection.query(
     query_embeddings=[query_embedding],
-    n_results=n_results,  # 5 sem filtros, até 50 com filtros
+    n_results=n_results,  # 5 sem filtros, até 300 com filtros
     include=["distances", "documents", "metadatas"]
 )
 
-# 6. Aplica filtros de metadados (se especificados)
+# 6. Aplica filtros de metadados usando FILTER_FIELD_MAP (se especificados)
+# FILTER_FIELD_MAP define 10 filtros clínicos:
+#   - primary_site, tissue_origin, site_of_resection (partial match)
+#   - tissue_type, specimen_type (exact match)
+#   - disease_type, pathologic_stage (partial match)
+#   - ajcc_t, ajcc_n, ajcc_m (partial match)
 if filters_applied:
     # Separa resultados que atendem os filtros (matched) dos demais (remainder)
     matched, remainder = _filter_metadata_results(
         candidates,
-        sex=sex,       # 'male' ou 'female'
-        min_age=min_age,  # Ex: 50
-        max_age=max_age   # Ex: 65
+        sex=sex,                    # 'male' ou 'female'
+        min_age=min_age,            # Ex: 50
+        max_age=max_age,            # Ex: 65
+        primary_site=primary_site,  # Ex: "Stomach"
+        tissue_type=tissue_type,    # Ex: "Tumor"
+        disease_type=disease_type,  # Ex: "Adenocarcinoma"
+        # ... e outros 7 filtros clínicos
     )
     
     # Backfill: se matched < top_k, completa com remainder para garantir top_k resultados
@@ -297,6 +325,34 @@ else:
 "masculino", "homem", "m", "male" → "male"
 ```
 
+**Estratégias de Matching (FILTER_FIELD_MAP):**
+```python
+# Partial Match (permite substring case-insensitive):
+# - primary_site, tissue_origin, site_of_resection
+# - disease_type, pathologic_stage, ajcc_t/n/m
+# Exemplo: "stomach" match "Fundus of Stomach"
+
+# Exact Match (requer igualdade exata case-insensitive):
+# - tissue_type, specimen_type
+# Exemplo: "tumor" NÃO match "Tumor Primary" (só "Tumor")
+```
+
+**Mapeamento de Campos de Metadados:**
+```python
+FILTER_FIELD_MAP = {
+    "primary_site": {"keys": ("primary_site.project", "primary_site"), "allow_partial": True},
+    "tissue_origin": {"keys": ("tissue_or_organ_of_origin.diagnoses",), "allow_partial": True},
+    "site_of_resection": {"keys": ("site_of_resection_or_biopsy.diagnoses",), "allow_partial": True},
+    "tissue_type": {"keys": ("tissue_type.samples",), "allow_partial": False},
+    "specimen_type": {"keys": ("specimen_type.samples",), "allow_partial": False},
+    "disease_type": {"keys": ("disease_type.project", "disease_type"), "allow_partial": True},
+    "pathologic_stage": {"keys": ("ajcc_pathologic_stage.diagnoses",), "allow_partial": True},
+    "ajcc_t": {"keys": ("ajcc_pathologic_t.diagnoses",), "allow_partial": True},
+    "ajcc_n": {"keys": ("ajcc_pathologic_n.diagnoses",), "allow_partial": True},
+    "ajcc_m": {"keys": ("ajcc_pathologic_m.diagnoses",), "allow_partial": True},
+}
+```
+
 **Filtro de Idade:**
 ```python
 # Verifica age_approx ou age nos metadados
@@ -315,17 +371,17 @@ if max_age is not None:
 - Marca esses resultados com "⚠️ fora dos filtros" para clareza
 - **Garante sempre top_k=5 resultados**, conforme solicitado pelo usuário
 
-### Cálculo de Similaridade
+### Cálculo de Proximidade Vetorial
 
 ```python
-# Distância L2 → Percentual de similaridade
+# Distância L2 → Percentual de proximidade vetorial
 for distance in raw_distances:
-    similarity_percent = max(0, (1 - distance / 2) * 100)
+    proximity_percent = max(0, (1 - distance / 2) * 100)
 ```
 
-**Fórmula:** `similarity = (1 - L2_distance/2) * 100`
-- Distância 0.0 = 100% similar
-- Distância 2.0 = 0% similar
+**Fórmula:** `proximity = (1 - distance/2) * 100`
+- Distância 0.0 = 100% de proximidade vetorial
+- Distância 2.0 = 0% de proximidade vetorial
 
 ---
 
@@ -337,25 +393,39 @@ for distance in raw_distances:
 ```python
 """
 📊 Resultados da busca por imagem (Imagem → Imagens semelhantes):
-  #01 | 94.32% de similaridade | ISIC_0053494 (sexo: female, idade≈55)
-  #02 | 91.15% de similaridade | ISIC_0042781 (sexo: male, idade≈42)
-  #03 | 88.67% de similaridade | ISIC_0038956 (sexo: female, idade≈61)
-  #04 | 87.21% de similaridade | ISIC_0029145 (sexo: male, idade≈38)
-  #05 | 85.09% de similaridade | ISIC_0051382 (sexo: female, idade≈50)
+  #01 | 94.32% de proximidade vetorial | TCGA_0053494 (sexo: female, idade≈55)
+  #02 | 91.15% de proximidade vetorial | TCGA_0042781 (sexo: male, idade≈42)
+  #03 | 88.67% de proximidade vetorial | TCGA_0038956 (sexo: female, idade≈61)
+  #04 | 87.21% de proximidade vetorial | TCGA_0029145 (sexo: male, idade≈38)
+  #05 | 85.09% de proximidade vetorial | TCGA_0051382 (sexo: female, idade≈50)
 ————————————————————————————————————————————————
 """
 ```
 
-**Com filtros aplicados:**
+**Com filtros demográficos aplicados:**
 ```python
 """
 📊 Resultados da busca por imagem (Imagem → Imagens semelhantes):
   ↳ Filtros aplicados: sexo: feminino, idade mínima: 50 anos
-  #01 | 94.32% de similaridade | ISIC_0053494 (sexo: female, idade≈55)
-  #02 | 88.67% de similaridade | ISIC_0038956 (sexo: female, idade≈61)
-  #03 | 85.09% de similaridade | ISIC_0051382 (sexo: female, idade≈50)
-  #04 | 82.45% de similaridade | ISIC_0067821 (sexo: male, idade≈42, ⚠️ fora dos filtros)
-  #05 | 81.12% de similaridade | ISIC_0045392 (sexo: female, idade≈48, ⚠️ fora dos filtros)
+  #01 | 94.32% de proximidade vetorial | TCGA_0053494 (sexo: female, idade≈55)
+  #02 | 88.67% de proximidade vetorial | TCGA_0038956 (sexo: female, idade≈61)
+  #03 | 85.09% de proximidade vetorial | TCGA_0051382 (sexo: female, idade≈50)
+  #04 | 82.45% de proximidade vetorial | TCGA_0067821 (sexo: male, idade≈42, ⚠️ fora dos filtros)
+  #05 | 81.12% de proximidade vetorial | TCGA_0045392 (sexo: female, idade≈48, ⚠️ fora dos filtros)
+————————————————————————————————————————————————
+"""
+```
+
+**Com filtros clínicos avançados aplicados:**
+```python
+"""
+📊 Resultados da busca por imagem (Imagem → Imagens semelhantes):
+  ↳ Filtros aplicados: local primário: Stomach, tipo de tecido: Tumor, AJCC T: T2
+  #01 | 92.18% de proximidade vetorial | TCGA_0029451 (Stomach, Tumor, T2)
+  #02 | 89.34% de proximidade vetorial | TCGA_0041267 (Stomach, Tumor, T2)
+  #03 | 86.72% de proximidade vetorial | TCGA_0052893 (Stomach, Tumor, T2)
+  #04 | 83.55% de proximidade vetorial | TCGA_0038174 (Stomach, Tumor, T3, ⚠️ fora dos filtros)
+  #05 | 81.91% de proximidade vetorial | TCGA_0047629 (Stomach, Normal Tissue, T2, ⚠️ fora dos filtros)
 ————————————————————————————————————————————————
 """
 ```
@@ -407,7 +477,64 @@ _prune_cache()  # Remove arquivos antigos
 
 ---
 
-### **2. Sanitização de Respostas do Modelo**
+### **2. Sincronização via CoAgents (Shared State)**
+
+#### Arquitetura
+
+```typescript
+// Frontend: Observa estado compartilhado
+const { state } = useCoAgent<AgentState>({
+  name: "histopathology_agent",
+  initialState: { searchResults: null }
+});
+```
+
+```python
+# Backend: Publica resultados para estado compartilhado
+def _push_results_to_state(tool_context, payload):
+    state = getattr(tool_context, 'state', None)
+    if state is not None:
+        state["searchResults"] = payload
+        logger.info(f"📤 Publicado {len(payload['results'])} resultados para Shared State")
+```
+
+#### Vantagens
+
+- **Sincronização automática:** Frontend re-renderiza quando `state["searchResults"]` atualiza
+- **Sem polling:** Não precisa fazer requests HTTP repetidos
+- **Estrutura rica:** Backend envia objeto completo com metadados, filtros, timestamps
+- **Separação de concerns:** Chat exibe texto do Gemini, galeria exibe dados estruturados
+
+#### Payload Publicado
+
+```typescript
+interface SharedSearchResults {
+  results: SearchResultItem[];  // Array com rank, proximity, imageId, metadados completos
+  filters?: {
+    sex?: string;
+    minAge?: number;
+    maxAge?: number;
+    normalized?: Record<string, any>;   // Filtros normalizados (para matching)
+    display?: Record<string, any>;      // Filtros display-friendly (para UI)
+    summary?: string;                   // "sexo: feminino, local primário: Stomach"
+    fallbackUsed?: boolean;             // true se backfill foi necessário
+  };
+  timestamp?: number;
+}
+```
+
+#### Fluxo de Sincronização
+
+1. **Backend:** `search_by_image_query()` executa busca
+2. **Backend:** `_push_results_to_state(tool_context, payload)` publica
+3. **CopilotKit:** Propaga atualização via WebSocket/SSE
+4. **Frontend:** `useCoAgent` detecta mudança em `state.searchResults`
+5. **React:** Re-renderiza `<ResultsGallery data={state.searchResults} />`
+6. **UI:** Galeria exibe cards com metadados completos
+
+---
+
+### **3. Sanitização de Respostas do Modelo**
 
 #### Problema
 
@@ -427,7 +554,7 @@ if content.role == "model" and has_inline_data:
 
 ---
 
-### **3. Pruning de Mensagens**
+### **4. Pruning de Mensagens**
 
 #### Estratégia
 
@@ -504,15 +631,24 @@ const prunedMessages = [systemMessage, latestUserMessage].filter(Boolean);
 │  2. Resize se > 2048px                                          │
 │  3. Transform → Tensor (384x384, normalizado)                   │
 │  4. MUSK model → Embedding (768 dimensões)                      │
-│  5. Chroma.query(embedding, n_results=5 ou até 100)              │
-│  6. NOVO: Aplica filtros de metadados se sex/min_age/max_age    │
+│  5. Chroma.query(embedding, n_results=5 ou até 300)             │
+│  6. Aplica filtros usando FILTER_FIELD_MAP (12 filtros):        │
+│     - Demográficos: sex, min_age, max_age                       │
+│     - Clínicos: primary_site, tissue_origin, site_of_resection, │
+│       tissue_type, specimen_type, disease_type,                 │
+│       pathologic_stage, ajcc_t, ajcc_n, ajcc_m                  │
 │     - Separa matched (atendem filtros) e remainder              │
 │     - Se matched < top_k, completa com remainder (backfill)     │
-│     - Marca resultados fora dos filtros com ⚠️                  │
+│     - Marca resultados fora dos filtros com matchedFilters=false│
 │  7. Calcula similaridade: (1 - L2_dist/2) * 100                 │
-│  8. Formata com metadados: sexo, idade≈X                        │
+│  8. Publica para Shared State via _push_results_to_state():     │
+│     state["searchResults"] = {                                  │
+│       results: [...],  # Array com metadados completos          │
+│       filters: {normalized, display, summary, fallbackUsed},    │
+│       timestamp: ...                                            │
+│     }                                                           │
 └────────────────────────┬────────────────────────────────────────┘
-                         │ formatted_results (string)
+                         │ formatted_results (string) + state update
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Gemini 2.5 Flash                             │
@@ -523,9 +659,14 @@ const prunedMessages = [systemMessage, latestUserMessage].filter(Boolean);
                          │ response
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                   Frontend (CopilotKit)                         │
-│  - Renderiza resultados no chat                                 │
-│  - Exibe percentuais de similaridade                            │
+│         Frontend (CopilotKit + CoAgents)                        │
+│  - Chat renderiza resposta textual do Gemini                    │
+│  - useCoAgent observa state["searchResults"] (Shared State)     │
+│  - ResultsGallery sincroniza automaticamente:                   │
+│    • Exibe cards com metadados completos                        │
+│    • Mostra chips de filtros aplicados                          │
+│    • Marca resultados fora dos filtros com badge                │
+│    • Modal com detalhes completos (staging, diagnósticos)       │
 │  - Permite follow-up queries                                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -607,6 +748,46 @@ Agent: Interpreta como "analyze this image"
        → search_by_image_query(top_k=5)
 ```
 
+### **9. Busca com Filtros Clínicos de Local Primário**
+
+```
+User: [uploads image] "comparar com amostras do estômago"
+Agent: search_by_image_query(top_k=5, primary_site="Stomach")
+Result: Top 5 imagens de casos com local primário no estômago
+```
+
+### **10. Busca com Filtros de Tipo de Tecido**
+
+```
+User: "buscar imagens de tecido tumoral apenas"
+Agent: search_by_text_query(text_query="...", tissue_type="Tumor")
+Result: Top 5 imagens de amostras tumorais
+```
+
+### **11. Busca com Estágio AJCC**
+
+```
+User: [uploads image] "procurar casos no estágio T2"
+Agent: search_by_image_query(top_k=5, ajcc_t="T2")
+Result: Top 5 imagens de casos classificados como T2
+```
+
+### **12. Combinação Múltipla de Filtros Clínicos**
+
+```
+User: [uploads image] "estômago, tecido sólido, adenocarcinoma, estágio T2N1"
+Agent: search_by_image_query(
+         top_k=5,
+         primary_site="Stomach",
+         specimen_type="Solid Tissue",
+         disease_type="Adenocarcinoma",
+         ajcc_t="T2",
+         ajcc_n="N1"
+       )
+Result: Top 5 imagens atendendo todos os critérios clínicos
+        (com backfill se < 5 encontrados)
+```
+
 ---
 
 ## 🛡️ Tratamento de Erros
@@ -659,8 +840,8 @@ DTYPE = torch.float16  # Half precision para economia de memória
 ### **Vectorstore Chroma**
 
 ```python
-VECTORSTORE_DIR = "./streamlit_chroma_vectorstore_precomputed"
-COLLECTION = "isic_images_precomputed"
+VECTORSTORE_DIR = "./vectorstore/chroma_vectorstore"
+COLLECTION = "tcga_images_precomputed"
 EMBEDDING_DIM = 768  # Dimensão dos embeddings MUSK
 ```
 
@@ -699,8 +880,8 @@ AGENT_NAME = "histopathology_agent"
 3. **Agent (before):** Converte JSON → Gemini Parts + armazena cache
 4. **Gemini:** Decide usar ferramenta `search_by_image_query`
 5. **Tools:** Extrai imagem (inline/JSON/cache) → processa com MUSK
-6. **Tools:** Busca no Chroma → retorna top 5 similares
-7. **Frontend:** Exibe resultados formatados
+6. **Tools:** Busca no Chroma → retorna top 5 com proximidade vetorial
+7. **Frontend:** Exibe resultados formatados via Shared State (CoAgents)
 
 ### Pontos Fortes
 
@@ -709,16 +890,25 @@ AGENT_NAME = "histopathology_agent"
 ✅ Sanitização de respostas (previne erros)  
 ✅ Pruning de mensagens (economia de tokens)  
 ✅ Suporta follow-up queries sem reenvio  
-✅ **Filtros de metadados** (sexo, idade) com detecção em português  
-✅ **Backfill automático** garante sempre top_k resultados  
-✅ **Transparência:** marca resultados fora dos filtros com ⚠️  
-✅ **Exibe metadados** (sexo, idade≈X) em todos os resultados  
+✅ **12 filtros de metadados** (3 demográficos + 10 clínicos) com detecção em português  
+✅ **FILTER_FIELD_MAP:** mapeamento centralizado com estratégias partial/exact match  
+✅ **Backfill automático** garante sempre top_k resultados mesmo com filtros restritivos  
+✅ **Transparência:** marca resultados fora dos filtros com `matchedFilters: false`  
+✅ **Exibe metadados completos:** demográficos, diagnóstico, estágio AJCC, tipos de tecido  
+✅ **Shared State (CoAgents):** sincronização automática backend→frontend sem polling  
+✅ **Galeria rica:** cards interativos, modal de detalhes, chips de filtros aplicados  
+✅ **Normalização inteligente:** aceita variações em português ("estômago", "Stomach")  
+✅ **Proximidade vetorial:** métrica clara para ranking de resultados (0-100%)  
+✅ **Dataset TCGA:** usa imagens histopatológicas do The Cancer Genome Atlas  
 
 ### Limitações
 
 ⚠️ Sem contexto de conversas longas (pruning agressivo)  
 ⚠️ Cache limitado a 32 arquivos  
-⚠️ Requer CUDA para performance ideal  
+⚠️ Requer CUDA para performance ideal (CPU funciona mas é lento)  
 ⚠️ Dependência de API do Google (Gemini)  
 ⚠️ **Filtros podem ser "relaxados"** via backfill se poucos resultados atendem critérios  
 ⚠️ **Metadados ausentes** em algumas imagens causam exclusão nos filtros  
+⚠️ **Filtros clínicos dependem de qualidade dos metadados** do dataset TCGA  
+⚠️ **Matching case-insensitive:** "stomach" match "Fundus of Stomach" (pode gerar falsos positivos)  
+⚠️ **Shared State limitado:** só persiste durante sessão ativa (não há banco de dados)  

@@ -57,6 +57,21 @@ pip install -r requirements.txt
 
 ## Execução (Desenvolvimento)
 
+#### Adicionar token da Hugging Face (MUSK)
+O modelo MUSK baixa pesos do Hugging Face Hub. Defina o token para permitir o download:
+
+**Windows (PowerShell):**
+```powershell
+$env:HUGGING_FACE_HUB_TOKEN="SEU_TOKEN_HF"
+```
+
+**Linux/macOS:**
+```bash
+export HUGGING_FACE_HUB_TOKEN="SEU_TOKEN_HF"
+```
+
+Observação: também são aceitas as variáveis `HF_TOKEN` ou `HUGGINGFACEHUB_API_TOKEN`.
+
 ### Iniciar UI + Agente (recomendado)
 
 Executa frontend (porta 3000) e agente (porta 8000) simultaneamente:
