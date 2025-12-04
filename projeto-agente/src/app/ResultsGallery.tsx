@@ -249,7 +249,10 @@ function ResultCard({
         <span className="absolute left-3 top-3 rounded-full bg-black/70 px-2 py-1 text-xs font-semibold text-white">
           #{result.rank.toString().padStart(2, '0')}
         </span>
-        <span className="absolute right-3 top-3 rounded-full bg-white/80 px-2 py-1 text-xs font-semibold text-slate-900">
+        <span
+          className="absolute right-3 top-3 rounded-full bg-white/80 px-2 py-1 text-xs font-semibold text-slate-900"
+          title="Proximidade vetorial"
+        >
           {formatSimilarity(result.similarity)}
         </span>
       </div>
@@ -432,7 +435,7 @@ function ImagePreviewModal({
               {secondaryIdentifier && (
                 <p className="text-xs uppercase tracking-wide text-white/60">{secondaryIdentifier}</p>
               )}
-              <p className="text-sm text-white/70">Similaridade: {formatSimilarity(result.similarity)}</p>
+              <p className="text-sm text-white/70">Proximidade vetorial: {formatSimilarity(result.similarity)}</p>
               {result.matchedFilters === false && (
                 <p className="mt-2 rounded-md bg-amber-500/20 px-3 py-2 text-amber-200">
                   Este resultado foi incluído para completar o top-k, mas não atende a todos os filtros.
@@ -518,11 +521,11 @@ function ImagePreviewModal({
                 </button>
               )}
             </div>
-            {result.documentPath && (
+            {/* {result.documentPath && (
               <p className="rounded-2xl bg-white/5 px-4 py-3 text-xs text-white/60">
                 Caminho original: {result.documentPath}
               </p>
-            )}
+            )} */}
           </div>
         </div>
       </div>

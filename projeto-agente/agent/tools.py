@@ -994,12 +994,12 @@ def search_by_image_query(
     Returns:
         String formatada contendo os resultados da busca, incluindo:
         - Posição do resultado
-        - Percentual de similaridade
+        - Percentual de proximidade vetorial
         - Identificador ou descrição da imagem encontrada
     
     Examples:
         >>> search_by_image_query(top_k=3)
-        "Resultado #1: 85.23% de similaridade - TCGA-D7-A4YV-01Z-00-DX1\n..."
+        "Resultado #1: 85.23% de proximidade vetorial - TCGA-D7-A4YV-01Z-00-DX1\n..."
     """
     # Recuperar imagem diretamente do contexto
     image_bytes = None
@@ -1212,7 +1212,7 @@ def search_by_image_query(
         structured_results: List[dict] = []
 
         for i, (doc_path, distance, metadata) in enumerate(candidates, start=1):
-            similarity_percent = max(0, (1 - distance / 2) * 100)
+            similarity_percent = max(0.0, min(100.0, (1.0 - float(distance)) * 100.0))
             image_slug, image_ext, display, case_code, slide_code = _resolve_media_info(metadata, doc_path)
             resolved_path = metadata.get("resolved_image_path") if isinstance(metadata, dict) else None
             display_str = str(display or image_slug or doc_path or f"resultado_{i:02d}")
@@ -1237,7 +1237,7 @@ def search_by_image_query(
                 extra_bits.append("⚠️ fora dos filtros")
             extras = f" ({', '.join(extra_bits)})" if extra_bits else ""
             result_line = (
-                f"  #{i:02d} | {similarity_percent:.2f}% de similaridade | {display_str}{extras}"
+                f"  #{i:02d} | {similarity_percent:.2f}% de proximidade vetorial | {display_str}{extras}"
             )
             result_lines.append(result_line)
             logger.info(
@@ -1336,12 +1336,12 @@ def search_by_text_query(
     Returns:
         String formatada contendo os resultados da busca, incluindo:
         - Posição do resultado
-        - Percentual de similaridade
+        - Percentual de proximidade vetorial
         - Identificador ou descrição da imagem encontrada
         
     Example:
     >>> search_by_text_query("gastric adenocarcinoma with diffuse pattern", top_k=3)
-    "Resultado #1: 92.15% de similaridade - TCGA-D7-A4YV-01Z-00-DX1\n..."
+    "Resultado #1: 92.15% de proximidade vetorial - TCGA-D7-A4YV-01Z-00-DX1\n..."
     """
     normalized_filters, display_filters = _prepare_filters(
         sex,
@@ -1512,7 +1512,7 @@ def search_by_text_query(
         structured_results: List[dict] = []
 
         for i, (doc_path, distance, metadata) in enumerate(candidates, start=1):
-            similarity_percent = max(0, (1 - distance / 2) * 100)
+            similarity_percent = max(0.0, min(100.0, (1.0 - float(distance)) * 100.0))
             image_slug, image_ext, display, case_code, slide_code = _resolve_media_info(metadata, doc_path)
             resolved_path = metadata.get("resolved_image_path") if isinstance(metadata, dict) else None
             display_str = str(display or image_slug or doc_path or f"resultado_{i:02d}")
@@ -1537,7 +1537,7 @@ def search_by_text_query(
                 extra_bits.append("⚠️ fora dos filtros")
             extras = f" ({', '.join(extra_bits)})" if extra_bits else ""
             result_line = (
-                f"  #{i:02d} | {similarity_percent:.2f}% de similaridade | {display_str}{extras}"
+                f"  #{i:02d} | {similarity_percent:.2f}% de proximidade vetorial | {display_str}{extras}"
             )
             result_lines.append(result_line)
             logger.info(
