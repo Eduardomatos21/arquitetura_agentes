@@ -975,7 +975,7 @@ def search_by_image_query(
     
     Args:
           top_k: Número de resultados similares a retornar. Padrão é 5.
-          sex: Filtra por sexo biológico registrado no dataset ("female" ou "male").
+          sex: Filtra por gênero registrado no dataset ("female" ou "male").
               Aceita variantes em português como "feminino" ou "masculino".
           min_age: Idade mínima aproximada do paciente (inteiro).
                     max_age: Idade máxima aproximada do paciente (inteiro).
@@ -1319,7 +1319,7 @@ def search_by_text_query(
                    Exemplos: "prostate adenocarcinoma with cribriform pattern",
                    "melanoma with dermal invasion", "benign nevus".
           top_k: Número de resultados similares a retornar. Padrão é 5.
-          sex: Filtra por sexo biológico registrado no dataset ("female" ou "male").
+          sex: Filtra por gênero registrado no dataset ("female" ou "male").
               Aceita variantes em português como "feminino" ou "masculino".
           min_age: Idade mínima aproximada do paciente (inteiro).
           max_age: Idade máxima aproximada do paciente (inteiro).

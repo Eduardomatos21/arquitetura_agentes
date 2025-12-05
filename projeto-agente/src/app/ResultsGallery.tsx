@@ -270,7 +270,7 @@ function ResultCard({
             <span className="rounded-full bg-white/10 px-2 py-1">{`Slide: ${result.slideCode}`}</span>
           )}
           {formattedSex && (
-            <span className="rounded-full bg-white/10 px-2 py-1">{`Sexo: ${formattedSex}`}</span>
+            <span className="rounded-full bg-white/10 px-2 py-1">{`Gênero: ${formattedSex}`}</span>
           )}
           {ageDisplay && (
             <span className="rounded-full bg-white/10 px-2 py-1">{`Idade≈ ${ageDisplay}`}</span>
@@ -466,7 +466,7 @@ function ImagePreviewModal({
               <ul className="mt-2 space-y-1 text-white/80">
                 <li>Código do caso: {toDisplay(result.caseCode)}</li>
                 <li>Código do slide: {toDisplay(result.slideCode)}</li>
-                <li>Sexo: {toDisplay(formattedSex)}</li>
+                <li>Gênero: {toDisplay(formattedSex)}</li>
                 <li>Idade aproximada: {toDisplay(ageApproxDisplay)}</li>
                 <li>Idade no diagnóstico (anos): {toDisplay(ageAtDiagnosisDisplay)}</li>
                 <li>Raça: {toDisplay(raceDisplay)}</li>
