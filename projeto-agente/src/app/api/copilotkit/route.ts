@@ -1,8 +1,8 @@
 import { HttpAgent } from "@ag-ui/client";
 import {
-    CopilotRuntime,
-    ExperimentalEmptyAdapter,
-    copilotRuntimeNextJSAppRouterEndpoint,
+  CopilotRuntime,
+  ExperimentalEmptyAdapter,
+  copilotRuntimeNextJSAppRouterEndpoint,
 } from "@copilotkit/runtime";
 import { NextRequest } from "next/server";
  
@@ -16,7 +16,7 @@ const runtime = new CopilotRuntime({
   agents: {
     // Our FastAPI endpoint URL
     // TODO: change the name of the agent to the name of the agent and pass the URL to env variable
-    "histopathology_agent": new HttpAgent({url: "http://localhost:8000/"}),
+    "histopathology_agent": new HttpAgent({url: "http://localhost:7001/"}),
   }   
 });
  

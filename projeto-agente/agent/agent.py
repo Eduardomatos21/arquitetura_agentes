@@ -8,14 +8,15 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 api_key = os.getenv("GOOGLE_API_KEY")
 if api_key:
     print(f"✅ GOOGLE_API_KEY configurada: {api_key[:10]}...{api_key[-4:]}")
 else:
     print("❌ GOOGLE_API_KEY não encontrada!")
-
-from dotenv import load_dotenv
-load_dotenv()
 
 import json
 import base64
@@ -303,6 +304,25 @@ def before_model_modifier(
             import traceback
             traceback.print_exc()
     
+    # Track whether the request carried any explicit user payload (text or image).
+    has_user_payload = False
+    if llm_request.contents:
+        for content in llm_request.contents:
+            if getattr(content, "role", None) != "user":
+                continue
+            parts = getattr(content, "parts", None) or []
+            for part in parts:
+                text_value = getattr(part, "text", None)
+                if text_value and text_value.strip():
+                    has_user_payload = True
+                    break
+                if getattr(part, "inline_data", None):
+                    has_user_payload = True
+                    break
+            if has_user_payload:
+                break
+    setattr(callback_context, "_last_request_had_user_payload", has_user_payload)
+
     if agent_name == "histopathology_agent":
         logger.info("Injecting histopathology-specific system instruction prefix")
         original_instruction = llm_request.config.system_instruction or types.Content(role="system", parts=[])
@@ -381,6 +401,7 @@ def simple_after_model_modifier(
             elif hasattr(part, 'function_call') and part.function_call:
                 has_function_call = True
     logger.info("Response analysis: text=%s function_call=%s error=%s", has_text_response, has_function_call, bool(llm_response.error_message))
+    last_request_had_user_payload = getattr(callback_context, "_last_request_had_user_payload", True)
     
     if agent_name == "histopathology_agent":
         # Deixar o ADK tratar erros
@@ -400,6 +421,15 @@ def simple_after_model_modifier(
         
         # Tratar respostas vazias
         if not has_function_call and not has_text_response and not llm_response.error_message:
+            if not last_request_had_user_payload:
+                logger.info("Initial turn arrived without user payload; returning readiness message")
+                ready_content = types.Content(
+                    role="model",
+                    parts=[types.Part(text="Assistente pronto. Envie uma descrição ou imagem para iniciar a busca.")]
+                )
+                llm_response.content = ready_content
+                return llm_response
+
             logger.warning("LLM response was empty; injecting friendly error message")
             error_content = types.Content(
                 role="model",
@@ -407,8 +437,8 @@ def simple_after_model_modifier(
             )
             llm_response.content = error_content
             return llm_response
-    
-            logger.info("simple_after_model_modifier completed for agent=%s", agent_name)
+
+        logger.info("simple_after_model_modifier completed for agent=%s", agent_name)
     return None
 
 histopathology_agent = LlmAgent(
@@ -474,5 +504,5 @@ if __name__ == "__main__":
         print("   Get a key from: https://makersuite.google.com/app/apikey")
         print()
 
-    port = int(os.getenv("PORT", 8000))
+    port = int(os.getenv("PORT", 7001))
     uvicorn.run(app, host="0.0.0.0", port=port)

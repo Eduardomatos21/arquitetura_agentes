@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover - makes module import-safe in tooling
 STATE_KEY_LAST_IMAGE = "media:last_image"
 CACHE_DIR = Path(os.environ.get("SESSION_MEDIA_CACHE_DIR", Path(__file__).parent / "session_media_cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-MAX_CACHED_FILES = int(os.environ.get("SESSION_MEDIA_MAX_FILES", "32"))
+MAX_CACHED_FILES = int(os.environ.get("SESSION_MEDIA_MAX_FILES", "64"))
 
 
 def _persist_to_disk(image_bytes: bytes) -> Optional[str]:
